@@ -24,6 +24,10 @@ def test_store_round_trip(tmp_path: Path):
                 repo_path="/repo",
                 worktree_path="/repo-alpha",
                 branch="main",
+                parent_track_id="root",
+                purpose="Investigate alpha",
+                cleaned_at="2026-05-07T10:00:00Z",
+                worktree_removed_at="2026-05-07T10:05:00Z",
             )
         ],
         sessions=[
@@ -39,5 +43,8 @@ def test_store_round_trip(tmp_path: Path):
 
     loaded = store.load()
     assert loaded.tracks[0].id == "alpha"
+    assert loaded.tracks[0].parent_track_id == "root"
+    assert loaded.tracks[0].purpose == "Investigate alpha"
+    assert loaded.tracks[0].cleaned_at == "2026-05-07T10:00:00Z"
+    assert loaded.tracks[0].worktree_removed_at == "2026-05-07T10:05:00Z"
     assert loaded.sessions[0].alias == "Session One"
-

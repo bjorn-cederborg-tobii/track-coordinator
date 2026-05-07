@@ -11,7 +11,7 @@ import sys
 import tempfile
 import textwrap
 
-from .git_tools import GitContext, GitError, add_worktree, current_context, find_default_base_ref, list_worktrees
+from .git_tools import GitContext, GitError, add_worktree, current_context, list_worktrees, remove_worktree
 from .models import STATUS_ORDER, Session, State, Track, slugify, utc_now
 from .storage import Store
 
@@ -51,6 +51,7 @@ def build_parser() -> ArgumentParser:
 
     list_parser = subparsers.add_parser("list", help="List tracks.")
     list_parser.add_argument("--all", action="store_true", help="Include done tracks.")
+    subparsers.add_parser("paused", help="List parked tracks.")
 
     show_parser = subparsers.add_parser("show", help="Show a track.")
     show_parser.add_argument("track")
@@ -64,23 +65,31 @@ def build_parser() -> ArgumentParser:
     init_here_parser.add_argument("name", nargs="?", help="Track name. Defaults to a name derived from the current worktree.")
     init_here_parser.add_argument("--workspace", help="Workspace file to store for the track.")
 
-    new_parser = subparsers.add_parser("new", help="Create a new track.")
+    new_parser = subparsers.add_parser("new", help="Create a new track, or use --here to create one for the current worktree.")
     new_parser.add_argument("name")
-    new_parser.add_argument("--worktree", action="store_true", help="Create a new git worktree.")
+    new_parser.add_argument("--here", action="store_true", help="Create a track for the current worktree instead of creating a new worktree.")
+    new_parser.add_argument("--base", help="Base ref for the new branch when creating a new worktree track.")
+    new_parser.add_argument("--purpose", help="Short purpose or brief for the new track.")
     new_parser.add_argument("--workspace", help="Workspace file to store for the track.")
 
     open_parser = subparsers.add_parser("open", help="Open a track in VS Code.")
     open_parser.add_argument("track")
 
     command_help = {
+        "pause": "Mark a track as parked.",
         "park": "Mark a track as parked.",
         "wait": "Mark a track as waiting.",
+        "wake": "Mark a track as active.",
         "activate": "Mark a track as active.",
         "done": "Mark a track as done.",
     }
-    for command_name in ("park", "wait", "activate", "done"):
+    for command_name in ("pause", "park", "wait", "wake", "activate", "done"):
         state_parser = subparsers.add_parser(command_name, help=command_help[command_name])
         state_parser.add_argument("track")
+
+    cleanup_parser = subparsers.add_parser("cleanup", help="Clean up a done track.")
+    cleanup_parser.add_argument("track")
+    cleanup_parser.add_argument("--remove-worktree", action="store_true", help="Remove the linked git worktree from disk.")
 
     next_parser = subparsers.add_parser("next", help="Set the next step for a track.")
     next_parser.add_argument("track")
@@ -122,8 +131,11 @@ def build_parser() -> ArgumentParser:
     interactive_parser = subparsers.add_parser("i", help="Interactive fzf-backed commands.")
     interactive_subparsers = interactive_parser.add_subparsers(dest="interactive_command", required=True)
 
-    for interactive_name in ("open", "park", "done", "show", "scan"):
+    for interactive_name in ("open", "park", "wake", "done", "show", "scan"):
         interactive_subparsers.add_parser(interactive_name)
+
+    interactive_cleanup = interactive_subparsers.add_parser("cleanup")
+    interactive_cleanup.add_argument("--remove-worktree", action="store_true")
 
     interactive_codex = interactive_subparsers.add_parser("codex")
     interactive_codex_subparsers = interactive_codex.add_subparsers(dest="interactive_codex_command", required=True)
@@ -135,6 +147,8 @@ def build_parser() -> ArgumentParser:
 def dispatch(args: Namespace, store: Store) -> int:
     if args.command == "list":
         return command_list(store, include_done=args.all)
+    if args.command == "paused":
+        return command_paused(store)
     if args.command == "show":
         return command_show(store, args.track)
     if args.command == "here":
@@ -145,9 +159,18 @@ def dispatch(args: Namespace, store: Store) -> int:
         return command_new(store, args)
     if args.command == "open":
         return command_open(store, args.track)
-    if args.command in {"park", "wait", "activate", "done"}:
-        status = {"park": "parked", "wait": "waiting", "activate": "active", "done": "done"}[args.command]
+    if args.command in {"pause", "park", "wait", "wake", "activate", "done"}:
+        status = {
+            "pause": "parked",
+            "park": "parked",
+            "wait": "waiting",
+            "wake": "active",
+            "activate": "active",
+            "done": "done",
+        }[args.command]
         return command_status(store, args.track, status)
+    if args.command == "cleanup":
+        return command_cleanup(store, args.track, remove_worktree_flag=args.remove_worktree)
     if args.command == "next":
         return command_next(store, args.track, " ".join(args.text))
     if args.command == "note":
@@ -162,10 +185,16 @@ def dispatch(args: Namespace, store: Store) -> int:
 
 
 def command_list(store: Store, include_done: bool) -> int:
+    return command_list_filtered(store, include_done=include_done)
+
+
+def command_paused(store: Store) -> int:
+    return command_list_filtered(store, statuses={"parked"})
+
+
+def command_list_filtered(store: Store, include_done: bool = False, statuses: set[str] | None = None) -> int:
     state = store.load()
-    tracks = sort_tracks(state.tracks)
-    if not include_done:
-        tracks = [track for track in tracks if track.status != "done"]
+    tracks = filter_tracks(state.tracks, include_done=include_done, statuses=statuses)
     session_count = session_counts(state)
     rows = [
         [
@@ -199,6 +228,14 @@ def command_show(store: Store, track_ref: str) -> int:
     print(f"Repo: {track.repo_path}")
     print(f"Worktree: {track.worktree_path}")
     print(f"Branch: {track.branch}")
+    if track.parent_track_id:
+        print(f"Parent: {track.parent_track_id}")
+    if track.purpose:
+        print(f"Purpose: {track.purpose}")
+    if track.cleaned_at:
+        print(f"Cleaned: {track.cleaned_at}")
+    if track.worktree_removed_at:
+        print(f"Worktree removed: {track.worktree_removed_at}")
     if track.workspace_path:
         print(f"Workspace: {track.workspace_path}")
     print(f"Last touched: {track.last_touched_at}")
@@ -273,23 +310,38 @@ def command_new(store: Store, args: Namespace) -> int:
         if any(track.id == track_id for track in state.tracks):
             raise CliError(f"Track '{track_id}' already exists.")
 
-        if args.worktree:
-            branch = f"p/bcg/{track_id}"
-            base_ref = find_default_base_ref(context.repo_path)
-            worktree_path = context.repo_path.parent / f"{context.repo_path.name}-{track_id}"
-            if worktree_path.exists():
-                raise CliError(f"Worktree path already exists: {worktree_path}")
-            add_worktree(context.repo_path, branch, worktree_path, base_ref)
-            new_context = current_context(worktree_path)
-        else:
+        if args.here:
+            if args.base:
+                raise CliError("--base can only be used when creating a new worktree track.")
             if match_track_for_context(state, context) is not None:
                 raise CliError("A track already exists for the current worktree.")
             new_context = context
+            parent_track_id = None
+        else:
+            parent_track = match_track_for_context(state, context)
+            if parent_track is None:
+                raise CliError("No matching track for the current git context. Use 'track init-here' or 'track new <name> --here' first.")
+            branch = f"p/bcg/{track_id}"
+            base_ref = args.base or "HEAD"
+            worktree_path = context.repo_path.parent / f"{context.repo_path.name}-{track_id}"
+            if worktree_path.exists():
+                raise CliError(f"Worktree path already exists: {worktree_path}")
+            add_worktree(context.worktree_path, branch, worktree_path, base_ref)
+            new_context = current_context(worktree_path)
+            parent_track_id = parent_track.id
 
         workspace_path = normalize_optional_path(args.workspace)
         if workspace_path is None:
             workspace_path = autodetect_workspace(new_context.worktree_path)
-        create_track(state, args.name, new_context, workspace_path, now)
+        create_track(
+            state,
+            args.name,
+            new_context,
+            workspace_path,
+            now,
+            parent_track_id=parent_track_id,
+            purpose=args.purpose,
+        )
 
     store.update(mutate)
     return command_show(store, track_id)
@@ -298,7 +350,7 @@ def command_new(store: Store, args: Namespace) -> int:
 def command_open(store: Store, track_ref: str) -> int:
     state = store.load()
     track = resolve_track(state, track_ref)
-    target = track.workspace_path or track.worktree_path
+    target = open_target(track)
     command = ["code", "-n", target]
     if not launch_command(command):
         print(" ".join(shlex.quote(part) for part in command))
@@ -317,6 +369,39 @@ def command_status(store: Store, track_ref: str, status: str) -> int:
 
     track = store.update(mutate)
     print(f"{track.id}: {track.status}")
+    return 0
+
+
+def command_cleanup(store: Store, track_ref: str, remove_worktree_flag: bool) -> int:
+    state = store.load()
+    track = resolve_track(state, track_ref)
+    ensure_cleanup_allowed(track, remove_worktree_flag)
+
+    worktree_path = Path(track.worktree_path)
+    removed_now = False
+    if remove_worktree_flag and track.worktree_removed_at is None:
+        if not worktree_path.exists():
+            removed_now = True
+        else:
+            remove_worktree(Path(track.repo_path), worktree_path)
+            removed_now = True
+
+    now = utc_now()
+
+    def mutate(current_state: State) -> Track:
+        current_track = resolve_track(current_state, track_ref)
+        ensure_cleanup_allowed(current_track, remove_worktree_flag)
+        if current_track.cleaned_at is None:
+            current_track.cleaned_at = now
+        if remove_worktree_flag and removed_now and current_track.worktree_removed_at is None:
+            current_track.worktree_removed_at = now
+        touch_track(current_track, now)
+        return current_track
+
+    cleaned_track = store.update(mutate)
+    print(f"{cleaned_track.id}: cleaned")
+    if remove_worktree_flag and cleaned_track.worktree_removed_at:
+        print(f"{cleaned_track.id}: worktree removed")
     return 0
 
 
@@ -558,6 +643,16 @@ def command_interactive(store: Store, args: Namespace) -> int:
         if args.interactive_codex_command == "resume":
             return command_interactive_codex_resume(store)
         raise CliError(f"Unsupported interactive codex command: {args.interactive_codex_command}")
+    if args.interactive_command == "wake":
+        track_ref = pick_track(store, statuses={"parked"})
+        if track_ref is None:
+            return 1
+        return command_status(store, track_ref, "active")
+    if args.interactive_command == "cleanup":
+        track_ref = pick_track(store, statuses={"done"})
+        if track_ref is None:
+            return 1
+        return command_cleanup(store, track_ref, remove_worktree_flag=args.remove_worktree)
 
     track_ref = pick_track(store, include_done=args.interactive_command == "done")
     if track_ref is None:
@@ -662,11 +757,9 @@ def command_interactive_codex_resume(store: Store) -> int:
     return command_codex_resume(store, track.id, session_ref)
 
 
-def pick_track(store: Store, include_done: bool) -> str | None:
+def pick_track(store: Store, include_done: bool = False, statuses: set[str] | None = None) -> str | None:
     state = store.load()
-    tracks = sort_tracks(state.tracks)
-    if not include_done:
-        tracks = [track for track in tracks if track.status != "done"]
+    tracks = filter_tracks(state.tracks, include_done=include_done, statuses=statuses)
     if not tracks:
         raise CliError("No tracks available.")
     options = [f"{track.id}\t{track.status}\t{track.branch}\t{track.name}" for track in tracks]
@@ -730,7 +823,15 @@ def match_track_for_context(state: State, context: GitContext) -> Track | None:
     return None
 
 
-def create_track(state: State, name: str, context: GitContext, workspace_path: Path | None, now: str) -> Track:
+def create_track(
+    state: State,
+    name: str,
+    context: GitContext,
+    workspace_path: Path | None,
+    now: str,
+    parent_track_id: str | None = None,
+    purpose: str | None = None,
+) -> Track:
     track_id = slugify(name)
     if any(track.id == track_id for track in state.tracks):
         raise CliError(f"Track '{track_id}' already exists.")
@@ -741,6 +842,8 @@ def create_track(state: State, name: str, context: GitContext, workspace_path: P
         repo_path=str(context.repo_path),
         worktree_path=str(context.worktree_path),
         branch=context.branch,
+        parent_track_id=parent_track_id,
+        purpose=purpose,
         workspace_path=str(workspace_path) if workspace_path else None,
         created_at=now,
         updated_at=now,
@@ -880,9 +983,38 @@ def sort_tracks(tracks: list[Track]) -> list[Track]:
     return sorted(ordered, key=lambda track: STATUS_ORDER.get(track.status, 99))
 
 
+def filter_tracks(tracks: list[Track], include_done: bool = False, statuses: set[str] | None = None) -> list[Track]:
+    filtered = sort_tracks(tracks)
+    if statuses is not None:
+        return [track for track in filtered if track.status in statuses]
+    if not include_done:
+        return [track for track in filtered if track.status != "done"]
+    return filtered
+
+
 def touch_track(track: Track, when: str) -> None:
     track.updated_at = when
     track.last_touched_at = when
+
+
+def ensure_cleanup_allowed(track: Track, remove_worktree_flag: bool) -> None:
+    if track.status != "done":
+        raise CliError(f"Cleanup requires track '{track.id}' to already be done.")
+    if not remove_worktree_flag:
+        return
+    if Path(track.worktree_path).resolve() == Path(track.repo_path).resolve():
+        raise CliError(f"Cannot remove the main checkout for track '{track.id}'.")
+
+
+def open_target(track: Track) -> str:
+    worktree_path = Path(track.worktree_path)
+    if track.worktree_removed_at or not worktree_path.exists():
+        raise CliError(f"Worktree for track '{track.id}' no longer exists: {track.worktree_path}")
+    if track.workspace_path:
+        workspace_path = Path(track.workspace_path)
+        if workspace_path.exists():
+            return str(workspace_path)
+    return track.worktree_path
 
 
 def normalize_optional_path(value: str | None) -> Path | None:

@@ -63,9 +63,13 @@ class Track:
     repo_path: str
     worktree_path: str
     branch: str
+    parent_track_id: str | None = None
+    purpose: str | None = None
     workspace_path: str | None = None
     next_step: str = ""
     notes: str = ""
+    cleaned_at: str | None = None
+    worktree_removed_at: str | None = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     last_touched_at: str = field(default_factory=utc_now)
@@ -82,9 +86,13 @@ class Track:
             repo_path=str(data["repo_path"]),
             worktree_path=str(data["worktree_path"]),
             branch=str(data.get("branch", "HEAD")),
+            parent_track_id=_optional_str(data.get("parent_track_id")),
+            purpose=_optional_str(data.get("purpose")),
             workspace_path=_optional_str(data.get("workspace_path")),
             next_step=str(data.get("next_step", "")),
             notes=str(data.get("notes", "")),
+            cleaned_at=_optional_str(data.get("cleaned_at")),
+            worktree_removed_at=_optional_str(data.get("worktree_removed_at")),
             created_at=_string_or_now(data.get("created_at")),
             updated_at=_string_or_now(data.get("updated_at")),
             last_touched_at=_string_or_now(data.get("last_touched_at")),
@@ -98,9 +106,13 @@ class Track:
             "repo_path": self.repo_path,
             "worktree_path": self.worktree_path,
             "branch": self.branch,
+            "parent_track_id": self.parent_track_id,
+            "purpose": self.purpose,
             "workspace_path": self.workspace_path,
             "next_step": self.next_step,
             "notes": self.notes,
+            "cleaned_at": self.cleaned_at,
+            "worktree_removed_at": self.worktree_removed_at,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "last_touched_at": self.last_touched_at,

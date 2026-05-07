@@ -91,28 +91,6 @@ def list_worktrees(cwd: Path) -> list[WorktreeInfo]:
     return worktrees
 
 
-def find_default_base_ref(cwd: Path) -> str:
-    candidates = [
-        ("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"),
-        ("show-ref", "--verify", "--quiet", "refs/remotes/origin/main"),
-        ("show-ref", "--verify", "--quiet", "refs/remotes/origin/master"),
-    ]
-    try:
-        origin_head = git_output(cwd, *candidates[0])
-    except GitError:
-        origin_head = ""
-    if origin_head:
-        return origin_head
-
-    for ref_name, result in (("origin/main", candidates[1]), ("origin/master", candidates[2])):
-        completed = subprocess.run(["git", *result], cwd=cwd, check=False)
-        if completed.returncode == 0:
-            return ref_name
-
-    branch, detached = current_branch(cwd)
-    return "HEAD" if detached else branch
-
-
 def add_worktree(cwd: Path, branch: str, worktree_path: Path, base_ref: str) -> None:
     completed = subprocess.run(
         ["git", "worktree", "add", "-b", branch, str(worktree_path), base_ref],
@@ -125,3 +103,15 @@ def add_worktree(cwd: Path, branch: str, worktree_path: Path, base_ref: str) -> 
         stderr = completed.stderr.strip() or completed.stdout.strip()
         raise GitError(stderr or "git worktree add failed")
 
+
+def remove_worktree(cwd: Path, worktree_path: Path) -> None:
+    completed = subprocess.run(
+        ["git", "worktree", "remove", str(worktree_path)],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or completed.stdout.strip()
+        raise GitError(stderr or "git worktree remove failed")

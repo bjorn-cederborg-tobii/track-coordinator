@@ -26,6 +26,11 @@ def git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, text=True, capture_output=True)
 
 
+def git_output(cwd: Path, *args: str) -> str:
+    completed = subprocess.run(["git", *args], cwd=cwd, check=True, text=True, capture_output=True)
+    return completed.stdout.strip()
+
+
 def make_executable(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
     path.chmod(0o755)
@@ -73,7 +78,7 @@ def test_track_lifecycle_and_codex_commands(tmp_path: Path):
         encoding="utf-8",
     )
 
-    result = run_cli(["new", "XR5ML-482-marlin-fixes"], repo, env)
+    result = run_cli(["new", "XR5ML-482-marlin-fixes", "--here"], repo, env)
     assert result.returncode == 0, result.stderr
     assert "xr5ml-482-marlin-fixes" in result.stdout
 
@@ -139,13 +144,12 @@ def test_track_lifecycle_and_codex_commands(tmp_path: Path):
     assert "xr5ml-482-marlin-fixes" in result.stdout
 
 
-def test_worktree_creation_scan_here_and_unlabeled(tmp_path: Path):
+def test_new_creates_child_worktree_and_scan_here_and_unlabeled(tmp_path: Path):
     home = tmp_path / "home"
     home.mkdir()
     repo = init_repo(tmp_path)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    selection_file = tmp_path / "selection.log"
     make_executable(
         fake_bin / "fzf",
         textwrap.dedent(
@@ -166,10 +170,25 @@ def test_worktree_creation_scan_here_and_unlabeled(tmp_path: Path):
         "PATH": f"{fake_bin}:{Path('/usr/bin')}:{Path('/bin')}",
     }
 
-    result = run_cli(["new", "feature-x", "--worktree"], repo, env)
+    result = run_cli(["new", "root-track", "--here"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    (repo / "child-base.txt").write_text("base\n", encoding="utf-8")
+    git(repo, "add", "child-base.txt")
+    git(repo, "commit", "-m", "child base")
+    parent_head = git_output(repo, "rev-parse", "HEAD")
+
+    result = run_cli(["new", "feature-x", "--purpose", "Break out feature work"], repo, env)
     assert result.returncode == 0, result.stderr
     expected_worktree = tmp_path / "repo-feature-x"
     assert expected_worktree.exists()
+    assert "Parent: root-track" in result.stdout
+    assert "Purpose: Break out feature work" in result.stdout
+    assert git_output(expected_worktree, "rev-parse", "HEAD") == parent_head
+
+    result = run_cli(["codex", "list", "feature-x"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "No Codex sessions attached to feature-x." in result.stdout
 
     extra_worktree = tmp_path / "repo-scan-target"
     git(repo, "worktree", "add", "-b", "p/bcg/scan-target", str(extra_worktree), "HEAD")
@@ -213,7 +232,7 @@ def test_attach_current_falls_back_to_session_metadata(tmp_path: Path):
         "PATH": f"{Path('/usr/bin')}:{Path('/bin')}",
     }
 
-    result = run_cli(["new", "metadata-track"], repo, env)
+    result = run_cli(["new", "metadata-track", "--here"], repo, env)
     assert result.returncode == 0, result.stderr
 
     sessions_dir = home / ".codex" / "sessions" / "2026" / "05" / "07"
@@ -270,6 +289,21 @@ def test_init_here_discovers_session_from_recent_activity_path(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert "current-session" in result.stdout
     assert "Resume current work" in result.stdout
+
+
+def test_new_requires_existing_track_for_child_creation(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{Path('/usr/bin')}:{Path('/bin')}",
+    }
+
+    result = run_cli(["new", "child-track"], repo, env)
+    assert result.returncode == 1
+    assert "Use 'track init-here' or 'track new <name> --here' first." in result.stderr
 
 
 def test_init_here_creates_current_track_and_attaches_session(tmp_path: Path):
@@ -368,7 +402,7 @@ def test_note_edit_and_interactive_open(tmp_path: Path):
         "EDITOR": str(editor_script),
     }
 
-    result = run_cli(["new", "interactive-track"], repo, env)
+    result = run_cli(["new", "interactive-track", "--here"], repo, env)
     assert result.returncode == 0, result.stderr
 
     result = run_cli(["note", "edit", "interactive-track"], repo, env)
@@ -381,3 +415,189 @@ def test_note_edit_and_interactive_open(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     log_text = log_path.read_text(encoding="utf-8")
     assert "code:-n" in log_text
+
+
+def test_pause_paused_wait_and_interactive_wake(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    make_executable(
+        fake_bin / "fzf",
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import sys
+
+            lines = [line.rstrip("\\n") for line in sys.stdin if line.strip()]
+            if not lines:
+                raise SystemExit(1)
+            print(lines[0])
+            """
+        ),
+    )
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{fake_bin}:{Path('/usr/bin')}:{Path('/bin')}",
+    }
+
+    result = run_cli(["new", "pause-track", "--here"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["wait", "pause-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["paused"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "pause-track" not in result.stdout
+
+    result = run_cli(["pause", "pause-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "pause-track: parked" in result.stdout
+
+    result = run_cli(["paused"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "pause-track" in result.stdout
+
+    result = run_cli(["i", "wake"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "pause-track: active" in result.stdout
+
+    result = run_cli(["paused"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "pause-track" not in result.stdout
+
+
+def test_cleanup_and_interactive_cleanup_remove_worktree(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log_path = tmp_path / "commands.log"
+    make_executable(
+        fake_bin / "code",
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            printf "code:%s\\n" "$*" >> "{log_path}"
+            exit 0
+            """
+        ),
+    )
+    make_executable(
+        fake_bin / "fzf",
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import sys
+
+            lines = [line.rstrip("\\n") for line in sys.stdin if line.strip()]
+            if not lines:
+                raise SystemExit(1)
+            print(lines[0])
+            """
+        ),
+    )
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{fake_bin}:{Path('/usr/bin')}:{Path('/bin')}",
+    }
+
+    result = run_cli(["new", "root-track", "--here"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["new", "cleanup-track", "--purpose", "Cleanup validation"], repo, env)
+    assert result.returncode == 0, result.stderr
+    cleanup_worktree = tmp_path / "repo-cleanup-track"
+    assert cleanup_worktree.exists()
+
+    session_index = home / ".codex" / "session_index.jsonl"
+    session_index.parent.mkdir(parents=True)
+    session_index.write_text(
+        '{"id":"session-a","thread_name":"Cleanup Session","updated_at":"2026-05-07T10:00:00Z"}\n',
+        encoding="utf-8",
+    )
+
+    result = run_cli(["codex", "attach", "cleanup-track", "session-a"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["done", "cleanup-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["cleanup", "cleanup-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "cleanup-track: cleaned" in result.stdout
+
+    result = run_cli(["show", "cleanup-track"], repo, env)
+    assert "Cleaned:" in result.stdout
+    assert "Worktree removed:" not in result.stdout
+
+    result = run_cli(["codex", "list", "cleanup-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "session-a" in result.stdout
+
+    result = run_cli(["open", "cleanup-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "code:-n" in log_text
+
+    result = run_cli(["i", "cleanup", "--remove-worktree"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "cleanup-track: cleaned" in result.stdout
+    assert "cleanup-track: worktree removed" in result.stdout
+    assert not cleanup_worktree.exists()
+    assert "p/bcg/cleanup-track" in git_output(repo, "branch", "--list", "p/bcg/cleanup-track")
+
+    result = run_cli(["show", "cleanup-track"], repo, env)
+    assert "Worktree removed:" in result.stdout
+
+    result = run_cli(["codex", "list", "cleanup-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "session-a" in result.stdout
+
+    result = run_cli(["open", "cleanup-track"], repo, env)
+    assert result.returncode == 1
+    assert "Worktree for track 'cleanup-track' no longer exists" in result.stderr
+
+
+def test_cleanup_refuses_main_checkout_and_is_idempotent_when_missing(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{Path('/usr/bin')}:{Path('/bin')}",
+    }
+
+    result = run_cli(["new", "root-track", "--here"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["done", "root-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["cleanup", "root-track", "--remove-worktree"], repo, env)
+    assert result.returncode == 1
+    assert "Cannot remove the main checkout for track 'root-track'." in result.stderr
+
+    result = run_cli(["new", "child-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    child_worktree = tmp_path / "repo-child-track"
+    assert child_worktree.exists()
+
+    result = run_cli(["done", "child-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    git(repo, "worktree", "remove", str(child_worktree))
+    assert not child_worktree.exists()
+
+    result = run_cli(["cleanup", "child-track", "--remove-worktree"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "child-track: worktree removed" in result.stdout
+
+    result = run_cli(["show", "child-track"], repo, env)
+    assert "Worktree removed:" in result.stdout
