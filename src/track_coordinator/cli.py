@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from urllib.parse import unquote, urlparse
 
 from .git_tools import GitContext, GitError, add_worktree, current_context, list_worktrees, remove_worktree
 from .models import STATUS_ORDER, Session, State, Track, slugify, utc_now
@@ -32,6 +33,20 @@ class InitHereResult:
     track_id: str
     created: bool
     session_id: str | None
+
+
+@dataclass(frozen=True)
+class NewTrackResult:
+    track_id: str
+    session_id: str | None
+
+
+@dataclass(frozen=True)
+class DetectedWorkspace:
+    source_path: Path | None
+    document: dict[str, object]
+    folders: list[Path]
+    modified_at: float
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,6 +73,9 @@ def build_parser() -> ArgumentParser:
 
     subparsers.add_parser("here", help="Show the current track.")
 
+    prompt_parser = subparsers.add_parser("prompt", help="Print a compact prompt label for the current track.")
+    prompt_parser.add_argument("--status", action="store_true", help="Include the track status in the prompt label.")
+
     init_here_parser = subparsers.add_parser(
         "init-here",
         help="Create or refresh the track for the current worktree and attach the current Codex session.",
@@ -72,8 +90,16 @@ def build_parser() -> ArgumentParser:
     new_parser.add_argument("--purpose", help="Short purpose or brief for the new track.")
     new_parser.add_argument("--workspace", help="Workspace file to store for the track.")
 
-    open_parser = subparsers.add_parser("open", help="Open a track in VS Code.")
-    open_parser.add_argument("track")
+    open_parser = subparsers.add_parser("open", help="Open a track in VS Code, or pick one interactively when omitted.")
+    open_parser.add_argument("track", nargs="?")
+
+    rename_parser = subparsers.add_parser("rename", help="Rename a track display name.")
+    rename_parser.add_argument("track")
+    rename_parser.add_argument("name")
+
+    remove_parser = subparsers.add_parser("remove", help="Remove a track record.")
+    remove_parser.add_argument("track")
+    remove_parser.add_argument("--remove-worktree", action="store_true", help="Remove the linked git worktree from disk.")
 
     command_help = {
         "pause": "Mark a track as parked.",
@@ -137,6 +163,9 @@ def build_parser() -> ArgumentParser:
     interactive_cleanup = interactive_subparsers.add_parser("cleanup")
     interactive_cleanup.add_argument("--remove-worktree", action="store_true")
 
+    interactive_remove = interactive_subparsers.add_parser("remove")
+    interactive_remove.add_argument("--remove-worktree", action="store_true")
+
     interactive_codex = interactive_subparsers.add_parser("codex")
     interactive_codex_subparsers = interactive_codex.add_subparsers(dest="interactive_codex_command", required=True)
     interactive_codex_subparsers.add_parser("resume")
@@ -153,12 +182,18 @@ def dispatch(args: Namespace, store: Store) -> int:
         return command_show(store, args.track)
     if args.command == "here":
         return command_here(store)
+    if args.command == "prompt":
+        return command_prompt(store, include_status=args.status)
     if args.command == "init-here":
         return command_init_here(store, args)
     if args.command == "new":
         return command_new(store, args)
     if args.command == "open":
         return command_open(store, args.track)
+    if args.command == "rename":
+        return command_rename(store, args.track, args.name)
+    if args.command == "remove":
+        return command_remove(store, args.track, remove_worktree_flag=args.remove_worktree)
     if args.command in {"pause", "park", "wait", "wake", "activate", "done"}:
         status = {
             "pause": "parked",
@@ -267,23 +302,52 @@ def command_here(store: Store) -> int:
     return command_show(store, track.id)
 
 
+def command_prompt(store: Store, include_status: bool) -> int:
+    try:
+        context = current_context(Path.cwd())
+    except GitError:
+        return 0
+
+    state = store.load()
+    track = match_track_for_context(state, context)
+    if track is None:
+        return 0
+
+    label = track.id
+    if include_status:
+        label = f"{label}|{track.status}"
+    print(f"[{label}]")
+    return 0
+
+
 def command_init_here(store: Store, args: Namespace) -> int:
     context = current_context(Path.cwd())
     now = utc_now()
     requested_name = args.name or derive_track_name(context.repo_path, context.worktree_path)
-    workspace_path = normalize_optional_path(args.workspace)
-    if workspace_path is None:
-        workspace_path = autodetect_workspace(context.worktree_path)
     session_id = current_codex_session_id(context.worktree_path, Path.cwd())
 
     def mutate(state: State) -> InitHereResult:
         track = match_track_for_context(state, context)
         created = False
         if track is None:
+            workspace_path = resolve_workspace_for_track(
+                store,
+                slugify(requested_name),
+                source_worktree_path=context.worktree_path,
+                target_worktree_path=context.worktree_path,
+                explicit_workspace=args.workspace,
+            )
             track = create_track(state, requested_name, context, workspace_path, now)
             created = True
         else:
             validate_requested_track_name(track, args.name)
+            workspace_path = resolve_workspace_for_track(
+                store,
+                track.id,
+                source_worktree_path=context.worktree_path,
+                target_worktree_path=context.worktree_path,
+                explicit_workspace=args.workspace,
+            )
             maybe_update_track_workspace(track, workspace_path, now)
 
         if session_id:
@@ -305,8 +369,9 @@ def command_new(store: Store, args: Namespace) -> int:
     context = current_context(Path.cwd())
     now = utc_now()
     track_id = slugify(args.name)
+    session_id = current_codex_session_id(context.worktree_path, Path.cwd()) if args.here else None
 
-    def mutate(state: State) -> None:
+    def mutate(state: State) -> NewTrackResult:
         if any(track.id == track_id for track in state.tracks):
             raise CliError(f"Track '{track_id}' already exists.")
 
@@ -330,9 +395,13 @@ def command_new(store: Store, args: Namespace) -> int:
             new_context = current_context(worktree_path)
             parent_track_id = parent_track.id
 
-        workspace_path = normalize_optional_path(args.workspace)
-        if workspace_path is None:
-            workspace_path = autodetect_workspace(new_context.worktree_path)
+        workspace_path = resolve_workspace_for_track(
+            store,
+            track_id,
+            source_worktree_path=context.worktree_path,
+            target_worktree_path=new_context.worktree_path,
+            explicit_workspace=args.workspace,
+        )
         create_track(
             state,
             args.name,
@@ -342,18 +411,94 @@ def command_new(store: Store, args: Namespace) -> int:
             parent_track_id=parent_track_id,
             purpose=args.purpose,
         )
+        if args.here and session_id:
+            track = resolve_track(state, track_id)
+            attach_session_to_track(state, track, session_id, now)
+        return NewTrackResult(track_id=track_id, session_id=session_id if args.here else None)
 
-    store.update(mutate)
-    return command_show(store, track_id)
+    result = store.update(mutate)
+    command_show(store, result.track_id)
+    if args.here:
+        if result.session_id:
+            print(f"Attached current Codex session: {result.session_id}")
+        else:
+            print("Current Codex session: not found")
+    return 0
 
 
-def command_open(store: Store, track_ref: str) -> int:
+def command_open(store: Store, track_ref: str | None) -> int:
+    if track_ref is None:
+        track_ref = pick_track(store, include_done=True)
+        if track_ref is None:
+            return 1
+
     state = store.load()
     track = resolve_track(state, track_ref)
     target = open_target(track)
     command = ["code", "-n", target]
     if not launch_command(command):
         print(" ".join(shlex.quote(part) for part in command))
+    return 0
+
+
+def command_rename(store: Store, track_ref: str, name: str) -> int:
+    now = utc_now()
+
+    def mutate(state: State) -> Track:
+        track = resolve_track(state, track_ref)
+        validate_track_display_name(state, track, name)
+        track.name = name
+        touch_track(track, now)
+        return track
+
+    track = store.update(mutate)
+    print(f"{track.id}: {track.name}")
+    return 0
+
+
+def command_remove(store: Store, track_ref: str, remove_worktree_flag: bool) -> int:
+    state = store.load()
+    track = resolve_track(state, track_ref)
+    worktree_path = Path(track.worktree_path)
+    workspace_path = managed_workspace_path(store, track)
+    removed_worktree = False
+
+    if remove_worktree_flag:
+        ensure_remove_worktree_allowed(track)
+        if not track.worktree_removed_at and worktree_path.exists():
+            remove_worktree(Path(track.repo_path), worktree_path)
+            removed_worktree = True
+
+    def mutate(current_state: State) -> tuple[int, int]:
+        current_track = resolve_track(current_state, track_ref)
+        current_state.tracks = [item for item in current_state.tracks if item.id != current_track.id]
+
+        detached = 0
+        for session in current_state.sessions:
+            if session.track_id == current_track.id:
+                session.track_id = None
+                detached += 1
+
+        cleared = 0
+        for child in current_state.tracks:
+            if child.parent_track_id == current_track.id:
+                child.parent_track_id = None
+                cleared += 1
+
+        return detached, cleared
+
+    detached_sessions, cleared_children = store.update(mutate)
+
+    if workspace_path is not None:
+        workspace_path.unlink(missing_ok=True)
+
+    print(f"{track.id}: removed")
+    if remove_worktree_flag and (removed_worktree or track.worktree_removed_at):
+        print(f"{track.id}: worktree removed")
+    if detached_sessions:
+        print(f"{track.id}: detached {detached_sessions} session(s)")
+    if cleared_children:
+        print(f"{track.id}: cleared parent on {cleared_children} child track(s)")
     return 0
 
 
@@ -653,6 +798,11 @@ def command_interactive(store: Store, args: Namespace) -> int:
         if track_ref is None:
             return 1
         return command_cleanup(store, track_ref, remove_worktree_flag=args.remove_worktree)
+    if args.interactive_command == "remove":
+        track_ref = pick_track(store, include_done=True)
+        if track_ref is None:
+            return 1
+        return command_remove(store, track_ref, remove_worktree_flag=args.remove_worktree)
 
     track_ref = pick_track(store, include_done=args.interactive_command == "done")
     if track_ref is None:
@@ -864,6 +1014,17 @@ def validate_requested_track_name(track: Track, requested_name: str | None) -> N
     raise CliError(f"Current worktree already belongs to track '{track.id}'.")
 
 
+def validate_track_display_name(state: State, track: Track, name: str) -> None:
+    normalized = name.strip()
+    if not normalized:
+        raise CliError("Track name cannot be empty.")
+    for other in state.tracks:
+        if other.id == track.id:
+            continue
+        if other.name.casefold() == normalized.casefold():
+            raise CliError(f"Track name '{normalized}' is already in use.")
+
+
 def maybe_update_track_workspace(track: Track, workspace_path: Path | None, now: str) -> None:
     if workspace_path is None:
         return
@@ -872,6 +1033,18 @@ def maybe_update_track_workspace(track: Track, workspace_path: Path | None, now:
         return
     track.workspace_path = workspace_text
     touch_track(track, now)
+
+
+def managed_workspace_path(store: Store, track: Track) -> Path | None:
+    if not track.workspace_path:
+        return None
+    workspace_path = Path(track.workspace_path)
+    managed_root = (store.paths.state_dir / "workspaces").resolve()
+    try:
+        workspace_path.resolve().relative_to(managed_root)
+    except ValueError:
+        return None
+    return workspace_path
 
 
 def attach_session_to_track(state: State, track: Track, session_id: str, now: str) -> Session:
@@ -1002,6 +1175,10 @@ def ensure_cleanup_allowed(track: Track, remove_worktree_flag: bool) -> None:
         raise CliError(f"Cleanup requires track '{track.id}' to already be done.")
     if not remove_worktree_flag:
         return
+    ensure_remove_worktree_allowed(track)
+
+
+def ensure_remove_worktree_allowed(track: Track) -> None:
     if Path(track.worktree_path).resolve() == Path(track.repo_path).resolve():
         raise CliError(f"Cannot remove the main checkout for track '{track.id}'.")
 
@@ -1028,6 +1205,247 @@ def autodetect_workspace(worktree_path: Path) -> Path | None:
     if len(workspaces) == 1:
         return workspaces[0].resolve()
     return None
+
+
+def resolve_workspace_for_track(
+    store: Store,
+    track_id: str,
+    source_worktree_path: Path,
+    target_worktree_path: Path,
+    explicit_workspace: str | None,
+) -> Path | None:
+    workspace_path = normalize_optional_path(explicit_workspace)
+    if workspace_path is not None:
+        return workspace_path
+
+    detected = detect_current_vscode_workspace(Path.cwd(), source_worktree_path)
+    if detected and should_capture_workspace(detected):
+        return write_workspace_snapshot(
+            store,
+            track_id,
+            detected,
+            source_worktree_path=source_worktree_path,
+            target_worktree_path=target_worktree_path,
+        )
+
+    return autodetect_workspace(target_worktree_path)
+
+
+def detect_current_vscode_workspace(current_cwd: Path, worktree_path: Path) -> DetectedWorkspace | None:
+    if not os.environ.get("VSCODE_CLI"):
+        return None
+
+    workspace_storage_dir = Path.home() / ".config" / "Code" / "User" / "workspaceStorage"
+    if not workspace_storage_dir.exists():
+        return None
+
+    candidates: list[tuple[int, float, DetectedWorkspace]] = []
+    for storage_file in workspace_storage_dir.glob("*/workspace.json"):
+        detected = read_workspace_storage_entry(storage_file)
+        if detected is None:
+            continue
+        score = workspace_match_score(detected.folders, current_cwd, worktree_path)
+        if score < 0:
+            continue
+        candidates.append((score, detected.modified_at, detected))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
+def read_workspace_storage_entry(storage_file: Path) -> DetectedWorkspace | None:
+    try:
+        data = json.loads(storage_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    folder_uri = data.get("folder")
+    if isinstance(folder_uri, str):
+        folder_path = file_uri_to_path(folder_uri)
+        if folder_path is None:
+            return None
+        return DetectedWorkspace(
+            source_path=None,
+            document={"folders": [{"path": str(folder_path)}]},
+            folders=[folder_path],
+            modified_at=storage_file.stat().st_mtime,
+        )
+
+    workspace_uri = data.get("workspace")
+    if not isinstance(workspace_uri, str):
+        return None
+    workspace_path = file_uri_to_path(workspace_uri)
+    if workspace_path is None or not workspace_path.exists():
+        return None
+
+    document = read_workspace_document(workspace_path)
+    if document is None:
+        return None
+    folders = extract_workspace_folders(document, workspace_path)
+    if not folders:
+        return None
+    return DetectedWorkspace(
+        source_path=workspace_path,
+        document=document,
+        folders=folders,
+        modified_at=storage_file.stat().st_mtime,
+    )
+
+
+def should_capture_workspace(detected: DetectedWorkspace) -> bool:
+    return detected.source_path is not None or len(detected.folders) > 1
+
+
+def read_workspace_document(workspace_path: Path) -> dict[str, object] | None:
+    try:
+        raw = workspace_path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def extract_workspace_folders(document: dict[str, object], workspace_path: Path | None) -> list[Path]:
+    raw_folders = document.get("folders")
+    if not isinstance(raw_folders, list):
+        return []
+
+    folders: list[Path] = []
+    for item in raw_folders:
+        if not isinstance(item, dict):
+            continue
+        resolved = resolve_workspace_folder_entry(item, workspace_path)
+        if resolved is not None:
+            folders.append(resolved)
+    return folders
+
+
+def resolve_workspace_folder_entry(entry: dict[str, object], workspace_path: Path | None) -> Path | None:
+    path_value = entry.get("path")
+    if isinstance(path_value, str) and path_value:
+        folder_path = Path(path_value).expanduser()
+        if not folder_path.is_absolute():
+            if workspace_path is None:
+                return None
+            folder_path = (workspace_path.parent / folder_path).resolve()
+        else:
+            folder_path = folder_path.resolve()
+        return folder_path
+
+    uri_value = entry.get("uri")
+    if isinstance(uri_value, str) and uri_value:
+        return file_uri_to_path(uri_value)
+    return None
+
+
+def file_uri_to_path(value: str) -> Path | None:
+    parsed = urlparse(value)
+    if parsed.scheme != "file":
+        return None
+    path = unquote(parsed.path)
+    if parsed.netloc and parsed.netloc != "localhost":
+        path = f"//{parsed.netloc}{path}"
+    return Path(path).resolve()
+
+
+def workspace_match_score(folders: list[Path], current_cwd: Path, worktree_path: Path) -> int:
+    best = -1
+    for folder in folders:
+        if folder == worktree_path:
+            return 4
+        if path_contains(folder, current_cwd):
+            best = max(best, 3)
+        elif path_contains(folder, worktree_path):
+            best = max(best, 2)
+        elif path_contains(worktree_path, folder):
+            best = max(best, 1)
+    return best
+
+
+def path_contains(base: Path, target: Path) -> bool:
+    try:
+        target.resolve().relative_to(base.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def write_workspace_snapshot(
+    store: Store,
+    track_id: str,
+    detected: DetectedWorkspace,
+    source_worktree_path: Path,
+    target_worktree_path: Path,
+) -> Path:
+    workspace_dir = store.paths.state_dir / "workspaces"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    workspace_path = workspace_dir / f"{track_id}.code-workspace"
+    document = rewrite_workspace_document(detected.document, detected.source_path, source_worktree_path, target_worktree_path)
+    write_json_file(workspace_path, document)
+    return workspace_path.resolve()
+
+
+def rewrite_workspace_document(
+    document: dict[str, object],
+    source_workspace_path: Path | None,
+    source_worktree_path: Path,
+    target_worktree_path: Path,
+) -> dict[str, object]:
+    rewritten = json.loads(json.dumps(document))
+    raw_folders = rewritten.get("folders")
+    if not isinstance(raw_folders, list):
+        rewritten["folders"] = []
+        return rewritten
+
+    folders: list[dict[str, object]] = []
+    for item in raw_folders:
+        if not isinstance(item, dict):
+            continue
+        resolved = resolve_workspace_folder_entry(item, source_workspace_path)
+        if resolved is None:
+            continue
+        mapped = map_workspace_folder(resolved, source_worktree_path, target_worktree_path)
+        folder_entry = {key: value for key, value in item.items() if key not in {"path", "uri"}}
+        folder_entry["path"] = str(mapped)
+        folders.append(folder_entry)
+    rewritten["folders"] = folders
+    return rewritten
+
+
+def map_workspace_folder(folder_path: Path, source_worktree_path: Path, target_worktree_path: Path) -> Path:
+    source_worktree_resolved = source_worktree_path.resolve()
+    folder_resolved = folder_path.resolve()
+    try:
+        relative = folder_resolved.relative_to(source_worktree_resolved)
+    except ValueError:
+        return folder_resolved
+    return (target_worktree_path.resolve() / relative).resolve()
+
+
+def write_json_file(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f"{path.stem}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
 
 
 def derive_track_name(repo_path: Path, worktree_path: Path) -> str:
