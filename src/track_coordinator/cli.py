@@ -27,6 +27,13 @@ class CodexSessionMetadata:
     updated_at: str | None = None
 
 
+@dataclass(frozen=True)
+class InitHereResult:
+    track_id: str
+    created: bool
+    session_id: str | None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -49,6 +56,13 @@ def build_parser() -> ArgumentParser:
     show_parser.add_argument("track")
 
     subparsers.add_parser("here", help="Show the current track.")
+
+    init_here_parser = subparsers.add_parser(
+        "init-here",
+        help="Create or refresh the track for the current worktree and attach the current Codex session.",
+    )
+    init_here_parser.add_argument("name", nargs="?", help="Track name. Defaults to a name derived from the current worktree.")
+    init_here_parser.add_argument("--workspace", help="Workspace file to store for the track.")
 
     new_parser = subparsers.add_parser("new", help="Create a new track.")
     new_parser.add_argument("name")
@@ -125,6 +139,8 @@ def dispatch(args: Namespace, store: Store) -> int:
         return command_show(store, args.track)
     if args.command == "here":
         return command_here(store)
+    if args.command == "init-here":
+        return command_init_here(store, args)
     if args.command == "new":
         return command_new(store, args)
     if args.command == "open":
@@ -204,14 +220,48 @@ def command_here(store: Store) -> int:
     state = store.load()
     track = match_track_for_context(state, context)
     if track is None:
-        derived_name = context.worktree_path.name
+        derived_name = derive_track_name(context.repo_path, context.worktree_path)
         print("No matching track for the current git context.")
         print(f"Repo: {context.repo_path}")
         print(f"Worktree: {context.worktree_path}")
         print(f"Branch: {context.branch}")
-        print(f'Create one with: track new "{derived_name}"')
+        print(f'Create one with: track init-here "{derived_name}"')
         return 1
     return command_show(store, track.id)
+
+
+def command_init_here(store: Store, args: Namespace) -> int:
+    context = current_context(Path.cwd())
+    now = utc_now()
+    requested_name = args.name or derive_track_name(context.repo_path, context.worktree_path)
+    workspace_path = normalize_optional_path(args.workspace)
+    if workspace_path is None:
+        workspace_path = autodetect_workspace(context.worktree_path)
+    session_id = current_codex_session_id(context.worktree_path, Path.cwd())
+
+    def mutate(state: State) -> InitHereResult:
+        track = match_track_for_context(state, context)
+        created = False
+        if track is None:
+            track = create_track(state, requested_name, context, workspace_path, now)
+            created = True
+        else:
+            validate_requested_track_name(track, args.name)
+            maybe_update_track_workspace(track, workspace_path, now)
+
+        if session_id:
+            attach_session_to_track(state, track, session_id, now)
+        return InitHereResult(track_id=track.id, created=created, session_id=session_id)
+
+    result = store.update(mutate)
+    command_show(store, result.track_id)
+    if result.created:
+        print("Initialized current worktree.")
+    if result.session_id:
+        print(f"Attached current Codex session: {result.session_id}")
+    else:
+        print("Current Codex session: not found")
+    return 0
 
 
 def command_new(store: Store, args: Namespace) -> int:
@@ -239,20 +289,7 @@ def command_new(store: Store, args: Namespace) -> int:
         workspace_path = normalize_optional_path(args.workspace)
         if workspace_path is None:
             workspace_path = autodetect_workspace(new_context.worktree_path)
-
-        track = Track(
-            id=track_id,
-            name=args.name,
-            status="active",
-            repo_path=str(new_context.repo_path),
-            worktree_path=str(new_context.worktree_path),
-            branch=new_context.branch,
-            workspace_path=str(workspace_path) if workspace_path else None,
-            created_at=now,
-            updated_at=now,
-            last_touched_at=now,
-        )
-        state.tracks.append(track)
+        create_track(state, args.name, new_context, workspace_path, now)
 
     store.update(mutate)
     return command_show(store, track_id)
@@ -693,6 +730,67 @@ def match_track_for_context(state: State, context: GitContext) -> Track | None:
     return None
 
 
+def create_track(state: State, name: str, context: GitContext, workspace_path: Path | None, now: str) -> Track:
+    track_id = slugify(name)
+    if any(track.id == track_id for track in state.tracks):
+        raise CliError(f"Track '{track_id}' already exists.")
+    track = Track(
+        id=track_id,
+        name=name,
+        status="active",
+        repo_path=str(context.repo_path),
+        worktree_path=str(context.worktree_path),
+        branch=context.branch,
+        workspace_path=str(workspace_path) if workspace_path else None,
+        created_at=now,
+        updated_at=now,
+        last_touched_at=now,
+    )
+    state.tracks.append(track)
+    return track
+
+
+def validate_requested_track_name(track: Track, requested_name: str | None) -> None:
+    if not requested_name:
+        return
+    requested_id = slugify(requested_name)
+    if track.id == requested_id:
+        return
+    if track.name.casefold() == requested_name.casefold():
+        return
+    raise CliError(f"Current worktree already belongs to track '{track.id}'.")
+
+
+def maybe_update_track_workspace(track: Track, workspace_path: Path | None, now: str) -> None:
+    if workspace_path is None:
+        return
+    workspace_text = str(workspace_path)
+    if track.workspace_path == workspace_text:
+        return
+    track.workspace_path = workspace_text
+    touch_track(track, now)
+
+
+def attach_session_to_track(state: State, track: Track, session_id: str, now: str) -> Session:
+    session = find_session(state, "codex", session_id)
+    if session is None:
+        session = Session(
+            provider="codex",
+            id=session_id,
+            track_id=track.id,
+            created_at=now,
+            updated_at=now,
+            last_touched_at=now,
+        )
+        state.sessions.append(session)
+    else:
+        session.track_id = track.id
+        session.updated_at = now
+        session.last_touched_at = now
+    touch_track(track, now)
+    return session
+
+
 def find_session(state: State, provider: str, session_id: str) -> Session | None:
     for session in state.sessions:
         if session.provider == provider and session.id == session_id:
@@ -936,16 +1034,66 @@ def discover_codex_session_id(worktree_path: Path, current_cwd: Path) -> str | N
         if session is None:
             continue
         session_id, session_cwd = session
-        if session_cwd is None:
-            continue
-        resolved_session_cwd = session_cwd.resolve()
-        if (
-            resolved_session_cwd == worktree_path
-            or current_cwd == resolved_session_cwd
-            or current_cwd.is_relative_to(resolved_session_cwd)
-            or worktree_path.is_relative_to(resolved_session_cwd)
-        ):
+        if path_matches_context(session_cwd, worktree_path, current_cwd):
             return session_id
+
+    for candidate in candidates[:50]:
+        session_id = read_session_id_for_activity(candidate, worktree_path, current_cwd)
+        if session_id:
+            return session_id
+    return None
+
+
+def path_matches_context(session_cwd: Path | None, worktree_path: Path, current_cwd: Path) -> bool:
+    if session_cwd is None:
+        return False
+    resolved_session_cwd = session_cwd.resolve()
+    return (
+        resolved_session_cwd == worktree_path
+        or current_cwd == resolved_session_cwd
+        or current_cwd.is_relative_to(resolved_session_cwd)
+        or worktree_path.is_relative_to(resolved_session_cwd)
+    )
+
+
+def read_session_id_for_activity(path: Path, worktree_path: Path, current_cwd: Path) -> str | None:
+    session_id: str | None = None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                record_type = record.get("type")
+                payload = record.get("payload")
+                if record_type == "session_meta":
+                    if isinstance(payload, dict):
+                        discovered_id = optional_text(payload.get("id"))
+                        if discovered_id:
+                            session_id = discovered_id
+                        session_cwd = path_from_payload(payload.get("cwd"))
+                        if path_matches_context(session_cwd, worktree_path, current_cwd):
+                            return session_id
+                    continue
+
+                if record_type == "turn_context":
+                    if isinstance(payload, dict):
+                        session_cwd = path_from_payload(payload.get("cwd"))
+                        if path_matches_context(session_cwd, worktree_path, current_cwd):
+                            return session_id
+                    continue
+
+                if record_type == "event_msg" and isinstance(payload, dict):
+                    session_cwd = path_from_payload(payload.get("cwd"))
+                    if path_matches_context(session_cwd, worktree_path, current_cwd):
+                        return session_id
+    except OSError:
+        return None
     return None
 
 
@@ -975,8 +1123,7 @@ def read_session_meta(path: Path) -> tuple[str, Path | None] | None:
     if not session_id:
         return None
 
-    cwd = payload.get("cwd")
-    session_cwd = Path(str(cwd)).expanduser() if cwd else None
+    session_cwd = path_from_payload(payload.get("cwd"))
     return session_id, session_cwd
 
 
@@ -985,6 +1132,13 @@ def optional_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def path_from_payload(value: object) -> Path | None:
+    text = optional_text(value)
+    if text is None:
+        return None
+    return Path(text).expanduser()
 
 
 def unmatched_worktrees(state: State, repo_path: Path) -> list:

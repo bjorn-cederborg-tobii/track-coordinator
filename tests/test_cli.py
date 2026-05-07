@@ -240,6 +240,82 @@ def test_attach_current_falls_back_to_session_metadata(tmp_path: Path):
     assert "Resume current work" in result.stdout
 
 
+def test_init_here_discovers_session_from_recent_activity_path(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{Path('/usr/bin')}:{Path('/bin')}",
+    }
+
+    sessions_dir = home / ".codex" / "sessions" / "2026" / "05" / "07"
+    sessions_dir.mkdir(parents=True)
+    current_session = sessions_dir / "rollout-2026-05-07T09-00-00-current-session.jsonl"
+    current_session.write_text(
+        '{"timestamp":"2026-05-07T09:00:00.000Z","type":"session_meta","payload":{"id":"current-session","cwd":"/tmp/elsewhere"}}\n'
+        f'{{"timestamp":"2026-05-07T09:00:03.000Z","type":"turn_context","payload":{{"cwd":"{repo}"}}}}\n'
+        '{"timestamp":"2026-05-07T09:00:05.000Z","type":"event_msg","payload":{"type":"thread_name_updated","thread_id":"current-session","thread_name":"Resume current work"}}\n',
+        encoding="utf-8",
+    )
+
+    result = run_cli(["init-here", "metadata-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "metadata-track" in result.stdout
+    assert "Attached current Codex session: current-session" in result.stdout
+    assert "Resume current work" in result.stdout
+
+    result = run_cli(["codex", "list", "metadata-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "current-session" in result.stdout
+    assert "Resume current work" in result.stdout
+
+
+def test_init_here_creates_current_track_and_attaches_session(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    workspace = repo / "track-coordinator.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{Path('/usr/bin')}:{Path('/bin')}",
+    }
+    session_index = home / ".codex" / "session_index.jsonl"
+    session_index.parent.mkdir(parents=True)
+    session_index.write_text(
+        '{"id":"session-self","thread_name":"Bootstrap current work","updated_at":"2026-05-07T10:00:00Z"}\n',
+        encoding="utf-8",
+    )
+
+    result = run_cli(["here"], repo, env)
+    assert result.returncode == 1
+    assert 'track init-here "repo"' in result.stdout
+
+    self_env = dict(env)
+    self_env["CODEX_THREAD_ID"] = "session-self"
+    result = run_cli(["init-here", "Current Work Track"], repo, self_env)
+    assert result.returncode == 0, result.stderr
+    assert "Track: Current Work Track (current-work-track)" in result.stdout
+    assert f"Workspace: {workspace}" in result.stdout
+    assert "session-self" in result.stdout
+    assert "Bootstrap current work" in result.stdout
+    assert "Initialized current worktree." in result.stdout
+    assert "Attached current Codex session: session-self" in result.stdout
+
+    result = run_cli(["init-here"], repo, self_env)
+    assert result.returncode == 0, result.stderr
+    assert "Track: Current Work Track (current-work-track)" in result.stdout
+    assert "Initialized current worktree." not in result.stdout
+    assert "Attached current Codex session: session-self" in result.stdout
+
+    result = run_cli(["codex", "list", "current-work-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("session-self") == 1
+
+
 def test_note_edit_and_interactive_open(tmp_path: Path):
     home = tmp_path / "home"
     home.mkdir()
