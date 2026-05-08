@@ -43,6 +43,11 @@ def write_workspace_storage_entry(home: Path, storage_id: str, payload: dict[str
     (storage_dir / "workspace.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
+def write_rollout_file(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+
+
 def init_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -98,6 +103,10 @@ def test_track_lifecycle_and_codex_commands(tmp_path: Path):
     result = run_cli(["next", "xr5ml-482-marlin-fixes", "Update", "the", "tests"], repo, env)
     assert result.returncode == 0, result.stderr
 
+    result = run_cli(["next", "Polish", "the", "resume", "flow"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "xr5ml-482-marlin-fixes: Polish the resume flow" in result.stdout
+
     result = run_cli(["codex", "attach", "xr5ml-482-marlin-fixes", "session-123"], repo, env)
     assert result.returncode == 0, result.stderr
 
@@ -108,7 +117,8 @@ def test_track_lifecycle_and_codex_commands(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert "xr5ml-482-marlin-fixes" in result.stdout
     assert "session-123" not in result.stdout
-    assert "Update the tests" in result.stdout
+    assert "Polish the resume flow" in result.stdout
+    assert "unk:2" in result.stdout
 
     result = run_cli(["codex", "list", "xr5ml-482-marlin-fixes"], repo, env)
     assert result.returncode == 0, result.stderr
@@ -123,6 +133,15 @@ def test_track_lifecycle_and_codex_commands(tmp_path: Path):
     assert "session-self" in result.stdout
     assert "session-123" in result.stdout
     assert "Build track workflow tool" in result.stdout
+
+    result = run_cli(["sessions"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "Track: XR5ML-482-marlin-fixes (xr5ml-482-marlin-fixes)" in result.stdout
+    assert "provider" not in result.stdout.lower() or "Provider" in result.stdout
+    assert "codex" in result.stdout
+    assert "session-self" in result.stdout
+    assert "session-123" in result.stdout
+    assert "live=unk:2" in result.stdout
 
     result = run_cli(["open", "xr5ml-482-marlin-fixes"], repo, env)
     assert result.returncode == 0, result.stderr
@@ -161,6 +180,21 @@ def test_track_lifecycle_and_codex_commands(tmp_path: Path):
 
     result = run_cli(["list", "--all"], repo, env)
     assert "xr5ml-482-marlin-fixes" in result.stdout
+
+
+def test_next_requires_current_track_when_track_is_omitted(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{Path('/usr/bin')}:{Path('/bin')}",
+    }
+
+    result = run_cli(["next", "Do", "something"], repo, env)
+    assert result.returncode == 1
+    assert "No matching track for the current git context." in result.stderr
 
 
 def test_new_creates_child_worktree_and_scan_here_and_unlabeled(tmp_path: Path):
@@ -257,6 +291,164 @@ def test_prompt_is_silent_outside_tracked_git_context(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+def test_resume_wakes_track_opens_workspace_and_prints_codex_hint(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log_path = tmp_path / "commands.log"
+    make_executable(
+        fake_bin / "code",
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            printf "code:%s\\n" "$*" >> "{log_path}"
+            exit 0
+            """
+        ),
+    )
+    make_executable(
+        fake_bin / "fzf",
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import sys
+
+            lines = [line.rstrip("\\n") for line in sys.stdin if line.strip()]
+            if not lines:
+                raise SystemExit(1)
+            print(lines[0])
+            """
+        ),
+    )
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{fake_bin}:{Path('/usr/bin')}:{Path('/bin')}",
+    }
+    session_index = home / ".codex" / "session_index.jsonl"
+    session_index.parent.mkdir(parents=True)
+    session_index.write_text(
+        '{"id":"session-a","thread_name":"Resume Track Session","updated_at":"2026-05-07T10:00:00Z"}\n',
+        encoding="utf-8",
+    )
+
+    result = run_cli(["new", "resume-track", "--here"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["codex", "attach", "resume-track", "session-a"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["pause", "resume-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["resume"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "Track: resume-track (resume-track)" in result.stdout
+    assert "Status: active" in result.stdout
+    assert "Resume Track Session" in result.stdout
+    assert "Reopen Codex session in the VS Code extension: Resume Track Session" in result.stdout
+    assert "code:-n" in log_path.read_text(encoding="utf-8")
+
+
+def test_purpose_workspace_and_parent_commands(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{Path('/usr/bin')}:{Path('/bin')}",
+    }
+
+    result = run_cli(["new", "root-track", "--here"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["purpose", "root-track", "Tighten", "resume", "flow"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "root-track: purpose=Tighten resume flow" in result.stdout
+
+    workspace_file = tmp_path / "root-track.code-workspace"
+    workspace_file.write_text('{"folders":[{"path":"."}]}', encoding="utf-8")
+    result = run_cli(["workspace", "root-track", str(workspace_file)], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert f"root-track: workspace={workspace_file.resolve()}" in result.stdout
+
+    result = run_cli(["new", "child-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["parent", "child-track", "root-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "child-track: parent=root-track" in result.stdout
+
+    result = run_cli(["show", "child-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "Parent: root-track" in result.stdout
+
+    result = run_cli(["purpose", "root-track", "--clear"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "root-track: purpose=-" in result.stdout
+
+    result = run_cli(["workspace", "root-track", "--clear"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "root-track: workspace=-" in result.stdout
+
+    result = run_cli(["parent", "child-track", "--clear"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "child-track: parent=-" in result.stdout
+
+    result = run_cli(["show", "root-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "Purpose:" not in result.stdout
+    assert "Workspace:" not in result.stdout
+
+    result = run_cli(["show", "child-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "Parent:" not in result.stdout
+
+
+def test_completion_output_and_internal_track_completion(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{Path('/usr/bin')}:{Path('/bin')}",
+    }
+
+    result = run_cli(["new", "root-track", "--here"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["new", "done-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["done", "done-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["pause", "root-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["completion", "bash"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "complete -F _track_complete track" in result.stdout
+    assert "track _complete tracks" in result.stdout
+    assert 'attach attach-current detach name list status unlabeled resume' in result.stdout
+
+    result = run_cli(["_complete", "tracks"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "root-track"
+
+    result = run_cli(["_complete", "tracks", "--all"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["root-track", "done-track"]
+
+    result = run_cli(["_complete", "tracks", "--statuses", "parked"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "root-track"
 
 
 def test_attach_current_falls_back_to_session_metadata(tmp_path: Path):
@@ -415,6 +607,154 @@ def test_new_here_attaches_current_session(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert "session-self" in result.stdout
     assert "Current work session" in result.stdout
+
+
+def test_codex_status_infers_running_waiting_and_idle(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{Path('/usr/bin')}:{Path('/bin')}",
+    }
+
+    session_index = home / ".codex" / "session_index.jsonl"
+    session_index.parent.mkdir(parents=True)
+    session_index.write_text(
+        '{"id":"session-running","thread_name":"Running Session","updated_at":"2026-05-07T10:00:00Z"}\n'
+        '{"id":"session-waiting","thread_name":"Waiting Session","updated_at":"2026-05-07T10:05:00Z"}\n'
+        '{"id":"session-question","thread_name":"Question Session","updated_at":"2026-05-07T10:10:00Z"}\n'
+        '{"id":"session-idle","thread_name":"Idle Session","updated_at":"2026-05-07T10:15:00Z"}\n',
+        encoding="utf-8",
+    )
+    sessions_dir = home / ".codex" / "sessions" / "2026" / "05" / "07"
+    write_rollout_file(
+        sessions_dir / "rollout-2026-05-07T10-00-00-session-running.jsonl",
+        [
+            f'{{"timestamp":"2026-05-07T10:00:00.000Z","type":"session_meta","payload":{{"id":"session-running","cwd":"{repo}"}}}}',
+            '{"timestamp":"2026-05-07T10:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-running"}}',
+            '{"timestamp":"2026-05-07T10:00:02.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-running","arguments":"{}"}}',
+        ],
+    )
+    write_rollout_file(
+        sessions_dir / "rollout-2026-05-07T10-05-00-session-waiting.jsonl",
+        [
+            f'{{"timestamp":"2026-05-07T10:05:00.000Z","type":"session_meta","payload":{{"id":"session-waiting","cwd":"{repo}"}}}}',
+            '{"timestamp":"2026-05-07T10:05:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-waiting"}}',
+            '{"timestamp":"2026-05-07T10:05:02.000Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":"call-waiting","arguments":"{}"}}',
+        ],
+    )
+    write_rollout_file(
+        sessions_dir / "rollout-2026-05-07T10-10-00-session-question.jsonl",
+        [
+            f'{{"timestamp":"2026-05-07T10:10:00.000Z","type":"session_meta","payload":{{"id":"session-question","cwd":"{repo}"}}}}',
+            '{"timestamp":"2026-05-07T10:10:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-question"}}',
+            '{"timestamp":"2026-05-07T10:10:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Should I proceed?"}]}}',
+        ],
+    )
+    write_rollout_file(
+        sessions_dir / "rollout-2026-05-07T10-15-00-session-idle.jsonl",
+        [
+            f'{{"timestamp":"2026-05-07T10:15:00.000Z","type":"session_meta","payload":{{"id":"session-idle","cwd":"{repo}"}}}}',
+            '{"timestamp":"2026-05-07T10:15:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-idle"}}',
+            '{"timestamp":"2026-05-07T10:15:02.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-idle","arguments":"{}"}}',
+            '{"timestamp":"2026-05-07T10:15:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-idle","output":"ok"}}',
+            '{"timestamp":"2026-05-07T10:15:04.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-idle"}}',
+        ],
+    )
+
+    result = run_cli(["new", "status-track", "--here"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    for session_id in ("session-running", "session-waiting", "session-question", "session-idle"):
+        result = run_cli(["codex", "attach", "status-track", session_id], repo, env)
+        assert result.returncode == 0, result.stderr
+
+    result = run_cli(["codex", "list"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "session-running" in result.stdout
+    assert "running" in result.stdout
+    assert "session-waiting" in result.stdout
+    assert "waiting" in result.stdout
+    assert "session-question" in result.stdout
+    assert "session-idle" in result.stdout
+    assert "idle" in result.stdout
+
+    result = run_cli(["codex", "status"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "session-running" in result.stdout
+    assert "tool call in progress: exec_command" in result.stdout
+    assert "session-waiting" in result.stdout
+    assert "user input requested" in result.stdout
+    assert "session-question" in result.stdout
+    assert "assistant asked a question" in result.stdout
+    assert "session-idle" in result.stdout
+    assert "no active task" in result.stdout
+
+    result = run_cli(["show", "status-track"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "status=running" in result.stdout
+    assert "status=waiting" in result.stdout
+    assert "status=idle" in result.stdout
+
+
+def test_sessions_command_shows_non_codex_provider_as_unknown(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    state_dir = home / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "tracks.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tracks": [
+                    {
+                        "id": "provider-track",
+                        "name": "provider track",
+                        "status": "active",
+                        "repo_path": str(repo),
+                        "worktree_path": str(repo),
+                        "branch": git_output(repo, "branch", "--show-current"),
+                        "created_at": "2026-05-08T09:00:00Z",
+                        "updated_at": "2026-05-08T09:00:00Z",
+                        "last_touched_at": "2026-05-08T09:00:00Z",
+                    }
+                ],
+                "sessions": [
+                    {
+                        "provider": "claude",
+                        "id": "claude-1",
+                        "alias": "Spec work",
+                        "track_id": "provider-track",
+                        "created_at": "2026-05-08T09:01:00Z",
+                        "updated_at": "2026-05-08T09:01:00Z",
+                        "last_touched_at": "2026-05-08T09:01:00Z",
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(state_dir),
+        "PATH": f"{Path('/usr/bin')}:{Path('/bin')}",
+    }
+
+    result = run_cli(["sessions"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "provider track (provider-track)" in result.stdout
+    assert "claude" in result.stdout
+    assert "claude-1" in result.stdout
+    assert "unknown" in result.stdout
+
+    result = run_cli(["list"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "unk:1" in result.stdout
 
 
 def test_init_here_captures_current_multi_root_workspace(tmp_path: Path):
@@ -622,6 +962,64 @@ def test_note_edit_and_interactive_open_alias(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     log_text = log_path.read_text(encoding="utf-8")
     assert log_text.count("code:-n") >= 2
+
+
+def test_interactive_codex_attach_and_detach(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = init_repo(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    make_executable(
+        fake_bin / "fzf",
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import sys
+
+            lines = [line.rstrip("\\n") for line in sys.stdin if line.strip()]
+            if not lines:
+                raise SystemExit(1)
+            print(lines[0])
+            """
+        ),
+    )
+    env = {
+        "HOME": str(home),
+        "TRACK_COORDINATOR_HOME": str(home / "state"),
+        "PATH": f"{fake_bin}:{Path('/usr/bin')}:{Path('/bin')}",
+    }
+    session_index = home / ".codex" / "session_index.jsonl"
+    session_index.parent.mkdir(parents=True)
+    session_index.write_text(
+        '{"id":"session-a","thread_name":"Wrong Session","updated_at":"2026-05-07T09:00:00Z"}\n'
+        '{"id":"session-b","thread_name":"Right Session","updated_at":"2026-05-07T10:00:00Z"}\n',
+        encoding="utf-8",
+    )
+
+    result = run_cli(["new", "interactive-track", "--here"], repo, env)
+    assert result.returncode == 0, result.stderr
+
+    result = run_cli(["i", "codex", "attach"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "session-b: attached to interactive-track" in result.stdout
+
+    result = run_cli(["codex", "list"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "session-b" in result.stdout
+    assert "Right Session" in result.stdout
+
+    result = run_cli(["i", "codex", "detach"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "session-b: detached" in result.stdout
+
+    result = run_cli(["codex", "list"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "No Codex sessions attached to interactive-track." in result.stdout
+
+    result = run_cli(["codex", "unlabeled"], repo, env)
+    assert result.returncode == 0, result.stderr
+    assert "session-b" in result.stdout
 
 
 def test_pause_paused_wait_and_interactive_wake(tmp_path: Path):

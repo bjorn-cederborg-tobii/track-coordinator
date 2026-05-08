@@ -7,6 +7,9 @@ SKILLS_SOURCE_DIR="${REPO_ROOT}/skills"
 SKILLS_TARGET_DIR="${CODEX_HOME}/skills"
 MANIFEST_PATH="${CODEX_HOME}/.track-coordinator-installed-skills"
 PACKAGE_NAME="track-coordinator"
+XDG_DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
+BASH_COMPLETION_TARGET_DIR="${XDG_DATA_HOME}/bash-completion/completions"
+BASH_COMPLETION_TARGET_PATH="${BASH_COMPLETION_TARGET_DIR}/track"
 
 require_command() {
   local command_name="$1"
@@ -30,6 +33,7 @@ contains_line() {
 
 require_command uv
 require_command rsync
+require_command python3
 
 mkdir -p "${CODEX_HOME}" "${SKILLS_TARGET_DIR}"
 
@@ -54,6 +58,11 @@ fi
 echo "Installing CLI package: ${PACKAGE_NAME}"
 uv tool install --editable "${REPO_ROOT}" --force
 echo "Installed CLI command: track"
+
+mkdir -p "${BASH_COMPLETION_TARGET_DIR}"
+PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+  python3 -m track_coordinator completion bash > "${BASH_COMPLETION_TARGET_PATH}"
+echo "Installed bash completion: ${BASH_COMPLETION_TARGET_PATH}"
 
 manifest_tmp="$(mktemp "${MANIFEST_PATH}.XXXXXX")"
 trap 'rm -f "${manifest_tmp}"' EXIT

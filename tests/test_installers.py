@@ -56,6 +56,7 @@ raise SystemExit(1)
 def test_install_script_installs_cli_and_syncs_skills(tmp_path: Path) -> None:
     home = tmp_path / "home"
     codex_home = home / ".codex"
+    xdg_data_home = home / ".local" / "share"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     uv_log = tmp_path / "uv.log"
@@ -76,6 +77,7 @@ def test_install_script_installs_cli_and_syncs_skills(tmp_path: Path) -> None:
     result = run_script("install.sh", env)
     assert result.returncode == 0, result.stderr
     assert "Installed CLI command: track" in result.stdout
+    assert "Installed bash completion:" in result.stdout
     assert "Installed skill: track-workflow" in result.stdout
     assert "Removed stale managed skill: stale-skill" in result.stdout
 
@@ -86,11 +88,15 @@ def test_install_script_installs_cli_and_syncs_skills(tmp_path: Path) -> None:
     assert installed_skill.read_text(encoding="utf-8") == (ROOT / "skills" / "track-workflow" / "SKILL.md").read_text(encoding="utf-8")
     assert not stale_skill.exists()
     assert (codex_home / ".track-coordinator-installed-skills").read_text(encoding="utf-8") == "track-workflow\n"
+    completion_file = xdg_data_home / "bash-completion" / "completions" / "track"
+    assert completion_file.exists()
+    assert "complete -F _track_complete track" in completion_file.read_text(encoding="utf-8")
 
 
 def test_uninstall_script_removes_managed_skill_and_cli(tmp_path: Path) -> None:
     home = tmp_path / "home"
     codex_home = home / ".codex"
+    completion_file = home / ".local" / "share" / "bash-completion" / "completions" / "track"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     uv_log = tmp_path / "uv.log"
@@ -104,6 +110,8 @@ def test_uninstall_script_removes_managed_skill_and_cli(tmp_path: Path) -> None:
     (unrelated_skill / "SKILL.md").write_text("keep\n", encoding="utf-8")
     (codex_home / ".track-coordinator-installed-skills").write_text("track-workflow\n", encoding="utf-8")
     uv_state.write_text("track-coordinator v0.1.0\n", encoding="utf-8")
+    completion_file.parent.mkdir(parents=True)
+    completion_file.write_text("complete -F _track_complete track\n", encoding="utf-8")
 
     write_executable(fake_bin / "uv", fake_uv_script(uv_log))
     env = {
@@ -117,10 +125,12 @@ def test_uninstall_script_removes_managed_skill_and_cli(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "Removed skill: track-workflow" in result.stdout
     assert "Uninstalled CLI package: track-coordinator" in result.stdout
+    assert "Removed bash completion:" in result.stdout
 
     assert not managed_skill.exists()
     assert unrelated_skill.exists()
     assert not (codex_home / ".track-coordinator-installed-skills").exists()
+    assert not completion_file.exists()
 
     uv_log_text = uv_log.read_text(encoding="utf-8")
     assert "uv:tool list" in uv_log_text

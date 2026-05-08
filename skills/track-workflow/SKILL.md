@@ -1,6 +1,6 @@
 ---
 name: track-workflow
-description: Use when the user wants Codex to interact with development tracks managed by the `track` CLI: inspect the current track, create or rename tracks, create child worktree tracks, open tracks, pause or wake tracks, attach Codex sessions, or clean up done tracks.
+description: Use when the user wants Codex to interact with development tracks managed by the `track` CLI: inspect the current track, create or rename tracks, create child worktree tracks, open or resume tracks, edit metadata, attach Codex sessions, or clean up done tracks.
 ---
 
 # Track Workflow
@@ -24,6 +24,7 @@ Prefer raw `track` commands. Use `track i ...` only when the user explicitly wan
    - or `track init-here "<display name>"`
 3. To inspect attached sessions:
    - `track codex list`
+   - `track sessions`
 
 ## Current Worktree Capture
 
@@ -36,6 +37,7 @@ Use these when the user is already in the right repo/worktree.
   - `track codex attach-current`
 - Update the track state:
   - `track next <track> "<next step>"`
+  - `track next "<next step>"` for the current track
   - `track note <track> "<note>"`
   - `track note edit <track>`
 
@@ -71,6 +73,20 @@ Use `track new "<display name>" --here` only when the user explicitly wants to c
 
 `track park` and `track activate` still work, but prefer `pause` and `wake` in normal use.
 
+## Resume
+
+- Resume a specific track:
+  - `track resume <track>`
+- Resume by picking from active, waiting, or parked tracks:
+  - `track resume`
+
+Resume behavior:
+
+- opens the track in a new VS Code window
+- marks the track `active`
+- shows the track summary and next step
+- shows which Codex session to reopen manually in the VS Code extension
+
 ## Cleanup
 
 Cleanup is for finished tracks. It preserves metadata and attached sessions.
@@ -100,6 +116,22 @@ This keeps:
 - branch name
 - worktree path
 
+## Metadata Editing
+
+Use these to adjust safe track metadata after creation.
+
+- Set or clear purpose:
+  - `track purpose <track> "<purpose>"`
+  - `track purpose <track> --clear`
+- Set or clear workspace path:
+  - `track workspace <track> /abs/path/to/file.code-workspace`
+  - `track workspace <track> --clear`
+- Set or clear parent track:
+  - `track parent <track> <parent-track>`
+  - `track parent <track> --clear`
+
+Do not directly edit repo path, worktree path, or branch through metadata commands. Those are structural fields tied to git state.
+
 ## Remove
 
 - Remove a track record only:
@@ -124,23 +156,43 @@ Remove behavior:
   - `track codex attach-current`
 - Attach a known session ID to a track:
   - `track codex attach <track> <session-id>`
+- Detach a wrongly attached session by ID:
+  - `track codex detach <session-id>`
 - Name a session:
   - `track codex name <session-id> "<alias>"`
 - List sessions on a track:
   - `track codex list <track>`
   - `track codex list` for the current track
+- Show inferred live status for attached sessions:
+  - `track codex status <track>`
+  - `track codex status` for the current track
 - Find unattached discoverable sessions:
   - `track codex unlabeled`
+- Interactive attach/detach:
+  - `track i codex attach`
+  - `track i codex detach`
+
+## Global Session Overview
+
+- Show all attached sessions grouped by track:
+  - `track sessions`
+- This view is provider-agnostic.
+- Live status is provider-aware when implemented.
+  - Codex currently supports inferred `running`, `waiting`, `idle`, and `unknown`.
+  - Other providers show `unknown` until support is added.
 
 ## Useful Inspection Commands
 
 - `track list`
 - `track list --all`
+- `track sessions`
 - `track show <track>`
 - `track paused`
+- `track resume`
 - `track prompt`
 - `track prompt --status`
 - `track scan`
 - `track open`
 - `track i open`
+- `track completion bash`
 - `track i cleanup --remove-worktree`

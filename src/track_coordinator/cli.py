@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from argparse import ArgumentParser, Namespace
+from argparse import SUPPRESS, ArgumentParser, Namespace
 from dataclasses import dataclass
 import json
 import os
@@ -21,11 +21,195 @@ class CliError(RuntimeError):
     pass
 
 
+BASH_COMPLETION_SCRIPT = """\
+_track_complete_tracks() {
+    track _complete tracks "$@" 2>/dev/null
+}
+
+_track_complete() {
+    local cur prev words cword
+    if declare -F _init_completion >/dev/null 2>&1; then
+        _init_completion -n : || return
+    else
+        words=("${COMP_WORDS[@]}")
+        cword="${COMP_CWORD}"
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev=""
+        if (( COMP_CWORD > 0 )); then
+            prev="${COMP_WORDS[COMP_CWORD-1]}"
+        fi
+    fi
+
+    local commands="list paused show here prompt init-here new open resume rename purpose workspace parent remove pause park wait wake activate done cleanup next note scan sessions completion codex i"
+    local state_commands="pause park wait wake activate done"
+    local interactive_commands="open park wake done show scan cleanup remove codex"
+    local codex_commands="attach attach-current detach name list status unlabeled resume"
+
+    if (( cword == 1 )); then
+        COMPREPLY=( $(compgen -W "${commands}" -- "${cur}") )
+        return
+    fi
+
+    case "${words[1]}" in
+        show|rename|remove)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks --all)" -- "${cur}") )
+            fi
+            return
+            ;;
+        resume)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks)" -- "${cur}") )
+            fi
+            return
+            ;;
+        open)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks --all)" -- "${cur}") )
+            fi
+            return
+            ;;
+        purpose|workspace|parent)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks --all)" -- "${cur}") )
+                return
+            fi
+            if [[ "${words[1]}" == "purpose" && cword == 3 ]]; then
+                COMPREPLY=( $(compgen -W "--clear" -- "${cur}") )
+                return
+            fi
+            if [[ "${words[1]}" == "workspace" && cword == 3 ]]; then
+                COMPREPLY=( $(compgen -W "--clear" -- "${cur}") )
+                return
+            fi
+            if [[ "${words[1]}" == "parent" && cword == 3 ]]; then
+                COMPREPLY=( $(compgen -W "--clear $(_track_complete_tracks --all)" -- "${cur}") )
+                return
+            fi
+            return
+            ;;
+        cleanup)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks --statuses done)" -- "${cur}") )
+                return
+            fi
+            COMPREPLY=( $(compgen -W "--remove-worktree" -- "${cur}") )
+            return
+            ;;
+        note)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "edit $(_track_complete_tracks --all)" -- "${cur}") )
+                return
+            fi
+            if [[ "${words[2]}" == "edit" && cword == 3 ]]; then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks --all)" -- "${cur}") )
+                return
+            fi
+            return
+            ;;
+        next)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks --all)" -- "${cur}") )
+            fi
+            return
+            ;;
+        pause|park)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks)" -- "${cur}") )
+            fi
+            return
+            ;;
+        wait)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks)" -- "${cur}") )
+            fi
+            return
+            ;;
+        wake|activate)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks --statuses parked)" -- "${cur}") )
+            fi
+            return
+            ;;
+        done)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "$(_track_complete_tracks)" -- "${cur}") )
+            fi
+            return
+            ;;
+        completion)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "bash" -- "${cur}") )
+            fi
+            return
+            ;;
+        codex)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "${codex_commands}" -- "${cur}") )
+                return
+            fi
+            case "${words[2]}" in
+                attach|attach-current|list|status|resume)
+                    if (( cword == 3 )); then
+                        COMPREPLY=( $(compgen -W "$(_track_complete_tracks --all)" -- "${cur}") )
+                    fi
+                    return
+                    ;;
+                detach)
+                    return
+                    ;;
+            esac
+            return
+            ;;
+        i)
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "${interactive_commands}" -- "${cur}") )
+                return
+            fi
+            if [[ "${words[2]}" == "cleanup" || "${words[2]}" == "remove" ]]; then
+                COMPREPLY=( $(compgen -W "--remove-worktree" -- "${cur}") )
+            elif [[ "${words[2]}" == "codex" && cword == 3 ]]; then
+                COMPREPLY=( $(compgen -W "attach detach resume" -- "${cur}") )
+            fi
+            return
+            ;;
+    esac
+}
+
+complete -F _track_complete track
+"""
+
+
 @dataclass(frozen=True)
 class CodexSessionMetadata:
     session_id: str
     name: str | None = None
     updated_at: str | None = None
+
+
+@dataclass(frozen=True)
+class CodexSessionStatus:
+    session_id: str
+    state: str
+    detail: str | None = None
+    activity_at: str | None = None
+
+
+@dataclass(frozen=True)
+class SessionDisplayMetadata:
+    provider: str
+    session_id: str
+    name: str | None = None
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True)
+class SessionDisplayStatus:
+    provider: str
+    session_id: str
+    state: str = "unknown"
+    detail: str | None = None
+    activity_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,9 +277,27 @@ def build_parser() -> ArgumentParser:
     open_parser = subparsers.add_parser("open", help="Open a track in VS Code, or pick one interactively when omitted.")
     open_parser.add_argument("track", nargs="?")
 
+    resume_parser = subparsers.add_parser("resume", help="Resume work on a track.")
+    resume_parser.add_argument("track", nargs="?")
+
     rename_parser = subparsers.add_parser("rename", help="Rename a track display name.")
     rename_parser.add_argument("track")
     rename_parser.add_argument("name")
+
+    purpose_parser = subparsers.add_parser("purpose", help="Set or clear a track purpose.")
+    purpose_parser.add_argument("track")
+    purpose_parser.add_argument("text", nargs="*")
+    purpose_parser.add_argument("--clear", action="store_true", help="Clear the stored purpose.")
+
+    workspace_parser = subparsers.add_parser("workspace", help="Set or clear a track workspace path.")
+    workspace_parser.add_argument("track")
+    workspace_parser.add_argument("path", nargs="?")
+    workspace_parser.add_argument("--clear", action="store_true", help="Clear the stored workspace path.")
+
+    parent_parser = subparsers.add_parser("parent", help="Set or clear a track parent.")
+    parent_parser.add_argument("track")
+    parent_parser.add_argument("parent", nargs="?")
+    parent_parser.add_argument("--clear", action="store_true", help="Clear the stored parent track.")
 
     remove_parser = subparsers.add_parser("remove", help="Remove a track record.")
     remove_parser.add_argument("track")
@@ -117,15 +319,23 @@ def build_parser() -> ArgumentParser:
     cleanup_parser.add_argument("track")
     cleanup_parser.add_argument("--remove-worktree", action="store_true", help="Remove the linked git worktree from disk.")
 
-    next_parser = subparsers.add_parser("next", help="Set the next step for a track.")
-    next_parser.add_argument("track")
-    next_parser.add_argument("text", nargs="+")
+    next_parser = subparsers.add_parser("next", help="Set the next step for a track or the current track.")
+    next_parser.add_argument("parts", nargs="+")
 
     note_parser = subparsers.add_parser("note", help="Set or edit track notes.")
     note_parser.add_argument("parts", nargs="+")
     note_parser.add_argument("--append", action="store_true", help="Append to the existing note.")
 
     subparsers.add_parser("scan", help="List untracked worktrees in the current repo.")
+    subparsers.add_parser("sessions", help="Show attached agent sessions grouped by track.")
+
+    completion_parser = subparsers.add_parser("completion", help="Print shell completion setup.")
+    completion_parser.add_argument("shell", choices=("bash",))
+
+    internal_complete = subparsers.add_parser("_complete", help=SUPPRESS)
+    internal_complete.add_argument("category", choices=("tracks",), help=SUPPRESS)
+    internal_complete.add_argument("--all", action="store_true", help=SUPPRESS)
+    internal_complete.add_argument("--statuses", nargs="*", help=SUPPRESS)
 
     codex_parser = subparsers.add_parser("codex", help="Codex session commands.")
     codex_subparsers = codex_parser.add_subparsers(dest="codex_command", required=True)
@@ -140,12 +350,18 @@ def build_parser() -> ArgumentParser:
     )
     codex_attach_current.add_argument("track", nargs="?")
 
+    codex_detach = codex_subparsers.add_parser("detach", help="Detach a Codex session from its track.")
+    codex_detach.add_argument("session_id")
+
     codex_name = codex_subparsers.add_parser("name", help="Set a human-readable alias for a session.")
     codex_name.add_argument("session_id")
     codex_name.add_argument("alias")
 
     codex_list = codex_subparsers.add_parser("list", help="List Codex sessions for a track or the current track.")
     codex_list.add_argument("track", nargs="?")
+
+    codex_status = codex_subparsers.add_parser("status", help="Show inferred live status for Codex sessions on a track or the current track.")
+    codex_status.add_argument("track", nargs="?")
 
     codex_unlabeled = codex_subparsers.add_parser("unlabeled", help="List discoverable unlabeled Codex sessions.")
     codex_unlabeled.set_defaults(no_args=True)
@@ -168,6 +384,8 @@ def build_parser() -> ArgumentParser:
 
     interactive_codex = interactive_subparsers.add_parser("codex")
     interactive_codex_subparsers = interactive_codex.add_subparsers(dest="interactive_codex_command", required=True)
+    interactive_codex_subparsers.add_parser("attach")
+    interactive_codex_subparsers.add_parser("detach")
     interactive_codex_subparsers.add_parser("resume")
 
     return parser
@@ -190,8 +408,16 @@ def dispatch(args: Namespace, store: Store) -> int:
         return command_new(store, args)
     if args.command == "open":
         return command_open(store, args.track)
+    if args.command == "resume":
+        return command_resume(store, args.track)
     if args.command == "rename":
         return command_rename(store, args.track, args.name)
+    if args.command == "purpose":
+        return command_purpose(store, args)
+    if args.command == "workspace":
+        return command_workspace(store, args)
+    if args.command == "parent":
+        return command_parent(store, args)
     if args.command == "remove":
         return command_remove(store, args.track, remove_worktree_flag=args.remove_worktree)
     if args.command in {"pause", "park", "wait", "wake", "activate", "done"}:
@@ -207,11 +433,17 @@ def dispatch(args: Namespace, store: Store) -> int:
     if args.command == "cleanup":
         return command_cleanup(store, args.track, remove_worktree_flag=args.remove_worktree)
     if args.command == "next":
-        return command_next(store, args.track, " ".join(args.text))
+        return command_next(store, args)
     if args.command == "note":
         return command_note(store, args)
     if args.command == "scan":
         return command_scan(store)
+    if args.command == "sessions":
+        return command_sessions(store)
+    if args.command == "completion":
+        return command_completion(args.shell)
+    if args.command == "_complete":
+        return command_internal_complete(store, args)
     if args.command == "codex":
         return command_codex(store, args)
     if args.command == "i":
@@ -231,12 +463,17 @@ def command_list_filtered(store: Store, include_done: bool = False, statuses: se
     state = store.load()
     tracks = filter_tracks(state.tracks, include_done=include_done, statuses=statuses)
     session_count = session_counts(state)
+    attached_sessions = [session for session in state.sessions if session.track_id]
+    session_metadata = session_display_metadata_map(attached_sessions)
+    session_status = session_display_status_map(attached_sessions, session_metadata)
+    live_rollups = session_rollups_by_track(attached_sessions, session_status)
     rows = [
         [
             track.status,
             track.id,
             track.branch,
             str(session_count.get(track.id, 0)),
+            live_rollups.get(track.id, "-"),
             track.worktree_path,
             shorten(track.next_step, 36),
         ]
@@ -245,19 +482,16 @@ def command_list_filtered(store: Store, include_done: bool = False, statuses: se
     if not rows:
         print("No tracks found.")
         return 0
-    print(render_table(["Status", "Track", "Branch", "Sessions", "Worktree", "Next"], rows))
+    print(render_table(["Status", "Track", "Branch", "Sessions", "Live", "Worktree", "Next"], rows))
     return 0
 
 
 def command_show(store: Store, track_ref: str) -> int:
     state = store.load()
     track = resolve_track(state, track_ref)
-    session_metadata = codex_session_metadata_map(state.sessions)
-    attached_sessions = sorted(
-        [session for session in state.sessions if session.track_id == track.id and session.provider == "codex"],
-        key=lambda item: session_sort_key(item, session_metadata),
-        reverse=True,
-    )
+    attached_sessions = attached_sessions_for_track(state, track.id)
+    session_metadata = session_display_metadata_map(attached_sessions)
+    session_status = session_display_status_map(attached_sessions, session_metadata)
     print(f"Track: {track.name} ({track.id})")
     print(f"Status: {track.status}")
     print(f"Repo: {track.repo_path}")
@@ -279,11 +513,14 @@ def command_show(store: Store, track_ref: str) -> int:
         print("Notes:")
         print(track.notes)
     if attached_sessions:
-        print("Codex sessions:")
+        print("Sessions:")
         for session in attached_sessions:
             label = session.alias or "-"
-            name = session_metadata.get(session.id, CodexSessionMetadata(session.id)).name or "-"
-            print(f"  {session.id}  alias={label}  name={name}")
+            metadata = session_metadata.get(session_ref_key(session), SessionDisplayMetadata(session.provider, session.id))
+            status = session_status.get(session_ref_key(session), SessionDisplayStatus(session.provider, session.id))
+            print(
+                f"  {session.provider}  {session.id}  alias={label}  name={metadata.name or '-'}  status={status.state}"
+            )
     return 0
 
 
@@ -441,6 +678,44 @@ def command_open(store: Store, track_ref: str | None) -> int:
     return 0
 
 
+def command_resume(store: Store, track_ref: str | None) -> int:
+    if track_ref is None:
+        track_ref = pick_track(store)
+        if track_ref is None:
+            return 1
+
+    now = utc_now()
+
+    def mutate(state: State) -> Track:
+        track = resolve_track(state, track_ref)
+        if track.status == "done":
+            raise CliError(f"Track '{track.id}' is done. Reopen it explicitly with 'track open {track.id}' if needed.")
+        if track.status != "active":
+            track.status = "active"
+        touch_track(track, now)
+        return track
+
+    track = store.update(mutate)
+    command_open(store, track.id)
+    command_show(store, track.id)
+
+    state = store.load()
+    metadata = codex_session_metadata_map(state.sessions)
+    sessions = attached_codex_sessions(state, track.id, metadata)
+    if not sessions:
+        print("No Codex sessions attached.")
+        return 0
+
+    if len(sessions) == 1:
+        session = sessions[0]
+        label = metadata.get(session.id, CodexSessionMetadata(session.id)).name or session.alias or session.id
+        print(f"Reopen Codex session in the VS Code extension: {label}")
+        return 0
+
+    print("Reopen one of the attached Codex sessions listed above in the VS Code extension.")
+    return 0
+
+
 def command_rename(store: Store, track_ref: str, name: str) -> int:
     now = utc_now()
 
@@ -453,6 +728,91 @@ def command_rename(store: Store, track_ref: str, name: str) -> int:
 
     track = store.update(mutate)
     print(f"{track.id}: {track.name}")
+    return 0
+
+
+def command_purpose(store: Store, args: Namespace) -> int:
+    if args.clear:
+        if args.text:
+            raise CliError("Do not pass purpose text with --clear.")
+        purpose: str | None = None
+    else:
+        if not args.text:
+            raise CliError("Usage: track purpose <track> <text> or track purpose <track> --clear")
+        purpose = " ".join(args.text)
+
+    now = utc_now()
+
+    def mutate(state: State) -> Track:
+        track = resolve_track(state, args.track)
+        track.purpose = purpose
+        touch_track(track, now)
+        return track
+
+    track = store.update(mutate)
+    print(f"{track.id}: purpose={track.purpose or '-'}")
+    return 0
+
+
+def command_workspace(store: Store, args: Namespace) -> int:
+    if args.clear:
+        if args.path:
+            raise CliError("Do not pass a workspace path with --clear.")
+        workspace_path: Path | None = None
+    else:
+        if not args.path:
+            raise CliError("Usage: track workspace <track> <path> or track workspace <track> --clear")
+        workspace_path = normalize_optional_path(args.path)
+        if workspace_path is None:
+            raise CliError("Workspace path cannot be empty.")
+        if not workspace_path.exists():
+            raise CliError(f"Workspace path does not exist: {workspace_path}")
+
+    state = store.load()
+    track = resolve_track(state, args.track)
+    previous_managed_workspace = managed_workspace_path(store, track)
+    now = utc_now()
+
+    def mutate(current_state: State) -> Track:
+        current_track = resolve_track(current_state, args.track)
+        current_track.workspace_path = str(workspace_path) if workspace_path else None
+        touch_track(current_track, now)
+        return current_track
+
+    updated_track = store.update(mutate)
+    current_managed_workspace = managed_workspace_path(store, updated_track)
+    if previous_managed_workspace is not None and previous_managed_workspace != current_managed_workspace:
+        previous_managed_workspace.unlink(missing_ok=True)
+
+    print(f"{updated_track.id}: workspace={updated_track.workspace_path or '-'}")
+    return 0
+
+
+def command_parent(store: Store, args: Namespace) -> int:
+    if args.clear:
+        if args.parent:
+            raise CliError("Do not pass a parent track with --clear.")
+        parent_track_id: str | None = None
+    else:
+        if not args.parent:
+            raise CliError("Usage: track parent <track> <parent> or track parent <track> --clear")
+        state = store.load()
+        track = resolve_track(state, args.track)
+        parent = resolve_track(state, args.parent)
+        if track.id == parent.id:
+            raise CliError("A track cannot be its own parent.")
+        parent_track_id = parent.id
+
+    now = utc_now()
+
+    def mutate(state: State) -> Track:
+        track = resolve_track(state, args.track)
+        track.parent_track_id = parent_track_id
+        touch_track(track, now)
+        return track
+
+    track = store.update(mutate)
+    print(f"{track.id}: parent={track.parent_track_id or '-'}")
     return 0
 
 
@@ -550,7 +910,8 @@ def command_cleanup(store: Store, track_ref: str, remove_worktree_flag: bool) ->
     return 0
 
 
-def command_next(store: Store, track_ref: str, text: str) -> int:
+def command_next(store: Store, args: Namespace) -> int:
+    track_ref, text = resolve_next_target(store, args.parts)
     now = utc_now()
 
     def mutate(state: State) -> Track:
@@ -630,15 +991,86 @@ def command_scan(store: Store) -> int:
     return 0
 
 
+def command_sessions(store: Store) -> int:
+    state = store.load()
+    attached_sessions = [session for session in state.sessions if session.track_id]
+    if not attached_sessions:
+        print("No attached sessions found.")
+        return 0
+
+    session_metadata = session_display_metadata_map(attached_sessions)
+    session_status = session_display_status_map(attached_sessions, session_metadata)
+    sessions_by_track: dict[str, list[Session]] = {}
+    for session in attached_sessions:
+        if session.track_id is None:
+            continue
+        sessions_by_track.setdefault(session.track_id, []).append(session)
+
+    tracks = sort_tracks([track for track in state.tracks if track.id in sessions_by_track])
+    blocks: list[str] = []
+    for track in tracks:
+        track_sessions = sorted(
+            sessions_by_track.get(track.id, []),
+            key=lambda item: session_sort_key(item, session_metadata),
+            reverse=True,
+        )
+        if not track_sessions:
+            continue
+        rows = [
+            [
+                session.provider,
+                session.id,
+                session.alias or "-",
+                session_metadata.get(session_ref_key(session), SessionDisplayMetadata(session.provider, session.id)).name or "-",
+                session_status.get(session_ref_key(session), SessionDisplayStatus(session.provider, session.id)).state,
+                session_status.get(session_ref_key(session), SessionDisplayStatus(session.provider, session.id)).detail or "-",
+                session_activity_at(session, session_metadata),
+            ]
+            for session in track_sessions
+        ]
+        header = (
+            f"Track: {track.name} ({track.id})  "
+            f"status={track.status}  "
+            f"branch={track.branch}  "
+            f"live={session_rollup(track_sessions, session_status)}"
+        )
+        blocks.append("\n".join([header, render_table(["Provider", "Session", "Alias", "Name", "Status", "Detail", "Activity"], rows)]))
+    print("\n\n".join(blocks))
+    return 0
+
+
+def command_completion(shell: str) -> int:
+    if shell != "bash":
+        raise CliError(f"Unsupported shell: {shell}")
+    print(BASH_COMPLETION_SCRIPT.rstrip())
+    return 0
+
+
+def command_internal_complete(store: Store, args: Namespace) -> int:
+    if args.category != "tracks":
+        raise CliError(f"Unsupported completion category: {args.category}")
+
+    statuses = set(args.statuses) if args.statuses else None
+    state = store.load()
+    tracks = filter_tracks(state.tracks, include_done=args.all, statuses=statuses)
+    for track in tracks:
+        print(track.id)
+    return 0
+
+
 def command_codex(store: Store, args: Namespace) -> int:
     if args.codex_command == "attach":
         return command_codex_attach(store, args.track, args.session_id)
     if args.codex_command == "attach-current":
         return command_codex_attach_current(store, args.track)
+    if args.codex_command == "detach":
+        return command_codex_detach(store, args.session_id)
     if args.codex_command == "name":
         return command_codex_name(store, args.session_id, args.alias)
     if args.codex_command == "list":
         return command_codex_list(store, args.track)
+    if args.codex_command == "status":
+        return command_codex_status(store, args.track)
     if args.codex_command == "unlabeled":
         return command_codex_unlabeled(store)
     if args.codex_command == "resume":
@@ -683,6 +1115,28 @@ def command_codex_attach_current(store: Store, track_ref: str | None) -> int:
     return command_codex_attach(store, track.id, session_id)
 
 
+def command_codex_detach(store: Store, session_id: str) -> int:
+    now = utc_now()
+
+    def mutate(state: State) -> Session:
+        session = find_session(state, "codex", session_id)
+        if session is None:
+            raise CliError(f"Codex session '{session_id}' was not found.")
+        if session.track_id is None:
+            raise CliError(f"Codex session '{session_id}' is not attached to any track.")
+
+        track = resolve_track(state, session.track_id)
+        session.track_id = None
+        session.updated_at = now
+        session.last_touched_at = now
+        touch_track(track, now)
+        return session
+
+    session = store.update(mutate)
+    print(f"{session.id}: detached")
+    return 0
+
+
 def command_codex_name(store: Store, session_id: str, alias: str) -> int:
     now = utc_now()
 
@@ -706,24 +1160,48 @@ def command_codex_list(store: Store, track_ref: str | None) -> int:
     state = store.load()
     track = resolve_track_or_current(state, track_ref)
     session_metadata = codex_session_metadata_map(state.sessions)
-    sessions = sorted(
-        [session for session in state.sessions if session.track_id == track.id and session.provider == "codex"],
-        key=lambda item: session_sort_key(item, session_metadata),
-        reverse=True,
-    )
+    sessions = attached_codex_sessions(state, track.id, session_metadata)
     if not sessions:
         print(f"No Codex sessions attached to {track.id}.")
         return 0
+    display_metadata = session_display_metadata_map(sessions)
+    session_status = session_display_status_map(sessions, display_metadata)
     rows = [
         [
             session.id,
             session.alias or "-",
             session_metadata.get(session.id, CodexSessionMetadata(session.id)).name or "-",
-            session_activity_at(session, session_metadata),
+            session_status.get(session_ref_key(session), SessionDisplayStatus(session.provider, session.id)).state,
+            session_activity_at(session, display_metadata),
         ]
         for session in sessions
     ]
-    print(render_table(["Session", "Alias", "Name", "Activity"], rows))
+    print(render_table(["Session", "Alias", "Name", "Status", "Activity"], rows))
+    return 0
+
+
+def command_codex_status(store: Store, track_ref: str | None) -> int:
+    state = store.load()
+    track = resolve_track_or_current(state, track_ref)
+    session_metadata = codex_session_metadata_map(state.sessions)
+    sessions = attached_codex_sessions(state, track.id, session_metadata)
+    if not sessions:
+        print(f"No Codex sessions attached to {track.id}.")
+        return 0
+
+    session_status = session_display_status_map(sessions)
+    rows = [
+        [
+            session.id,
+            session.alias or "-",
+            session_metadata.get(session.id, CodexSessionMetadata(session.id)).name or "-",
+            session_status.get(session_ref_key(session), SessionDisplayStatus(session.provider, session.id)).state,
+            session_status.get(session_ref_key(session), SessionDisplayStatus(session.provider, session.id)).detail or "-",
+            session_status.get(session_ref_key(session), SessionDisplayStatus(session.provider, session.id)).activity_at or "-",
+        ]
+        for session in sessions
+    ]
+    print(render_table(["Session", "Alias", "Name", "Status", "Detail", "Activity"], rows))
     return 0
 
 
@@ -785,6 +1263,10 @@ def command_interactive(store: Store, args: Namespace) -> int:
     if args.interactive_command == "scan":
         return command_interactive_scan(store)
     if args.interactive_command == "codex":
+        if args.interactive_codex_command == "attach":
+            return command_interactive_codex_attach(store)
+        if args.interactive_codex_command == "detach":
+            return command_interactive_codex_detach(store)
         if args.interactive_codex_command == "resume":
             return command_interactive_codex_resume(store)
         raise CliError(f"Unsupported interactive codex command: {args.interactive_codex_command}")
@@ -882,20 +1364,17 @@ def command_interactive_codex_resume(store: Store) -> int:
         return 1
     track_ref = selection[0].split("\t", 1)[0]
     track = resolve_track(state, track_ref)
-    sessions = sorted(
-        [session for session in state.sessions if session.provider == "codex" and session.track_id == track.id],
-        key=lambda item: session_sort_key(item, session_metadata),
-        reverse=True,
-    )
+    sessions = attached_codex_sessions(state, track.id, session_metadata)
     if len(sessions) == 1:
         return command_codex_resume(store, track.id, sessions[0].id)
+    display_metadata = session_display_metadata_map(sessions)
     session_options = [
         "\t".join(
             [
                 session.id,
                 session.alias or "-",
                 session_metadata.get(session.id, CodexSessionMetadata(session.id)).name or "-",
-                session_activity_at(session, session_metadata),
+                session_activity_at(session, display_metadata),
             ]
         )
         for session in sessions
@@ -905,6 +1384,86 @@ def command_interactive_codex_resume(store: Store) -> int:
         return 1
     session_ref = session_selection[0].split("\t", 1)[0]
     return command_codex_resume(store, track.id, session_ref)
+
+
+def command_interactive_codex_attach(store: Store) -> int:
+    state = store.load()
+    target_track = current_track_for_cwd(state)
+    if target_track is None:
+        track_ref = pick_track(store, include_done=True)
+        if track_ref is None:
+            return 1
+        state = store.load()
+        target_track = resolve_track(state, track_ref)
+
+    candidates = discover_unattached_codex_sessions(state)
+    if not candidates:
+        raise CliError("No unattached Codex sessions available.")
+
+    options = [
+        "\t".join(
+            [
+                session_id,
+                alias or "-",
+                name or "-",
+                updated_at or "-",
+            ]
+        )
+        for session_id, alias, name, updated_at in candidates
+    ]
+    selection = run_fzf(options, prompt="session> ")
+    if not selection:
+        return 1
+    session_id = selection[0].split("\t", 1)[0]
+    return command_codex_attach(store, target_track.id, session_id)
+
+
+def command_interactive_codex_detach(store: Store) -> int:
+    state = store.load()
+    target_track = current_track_for_cwd(state)
+    if target_track is not None:
+        sessions = attached_codex_sessions(state, target_track.id)
+    else:
+        sessions = []
+
+    if not sessions:
+        session_metadata = codex_session_metadata_map(state.sessions)
+        eligible_tracks = [
+            track
+            for track in state.tracks
+            if any(session.provider == "codex" and session.track_id == track.id for session in state.sessions)
+        ]
+        if not eligible_tracks:
+            raise CliError("No tracks with attached Codex sessions.")
+        options = [f"{track.id}\t{track.name}\t{track.branch}" for track in eligible_tracks]
+        selection = run_fzf(options, prompt="track> ")
+        if not selection:
+            return 1
+        track_ref = selection[0].split("\t", 1)[0]
+        target_track = resolve_track(state, track_ref)
+        sessions = attached_codex_sessions(state, target_track.id, session_metadata)
+
+    if not sessions:
+        raise CliError(f"No Codex sessions attached to {target_track.id}.")
+
+    session_metadata = codex_session_metadata_map(state.sessions)
+    display_metadata = session_display_metadata_map(sessions)
+    options = [
+        "\t".join(
+            [
+                session.id,
+                session.alias or "-",
+                session_metadata.get(session.id, CodexSessionMetadata(session.id)).name or "-",
+                session_activity_at(session, display_metadata),
+            ]
+        )
+        for session in sessions
+    ]
+    selection = run_fzf(options, prompt="session> ")
+    if not selection:
+        return 1
+    session_id = selection[0].split("\t", 1)[0]
+    return command_codex_detach(store, session_id)
 
 
 def pick_track(store: Store, include_done: bool = False, statuses: set[str] | None = None) -> str | None:
@@ -956,6 +1515,25 @@ def resolve_track_or_current(state: State, track_ref: str | None) -> Track:
     if track is None:
         raise CliError("No matching track for the current git context. Specify a track explicitly.")
     return track
+
+
+def resolve_next_target(store: Store, parts: list[str]) -> tuple[str, str]:
+    if not parts:
+        raise CliError("Usage: track next [<track>] <text>")
+
+    state = store.load()
+    explicit_track_ref = parts[0]
+    explicit_text = " ".join(parts[1:])
+    if explicit_text:
+        try:
+            track = resolve_track(state, explicit_track_ref)
+        except CliError:
+            pass
+        else:
+            return track.id, explicit_text
+
+    current_track = resolve_track_or_current(state, None)
+    return current_track.id, " ".join(parts)
 
 
 def match_track_for_context(state: State, context: GitContext) -> Track | None:
@@ -1074,6 +1652,72 @@ def find_session(state: State, provider: str, session_id: str) -> Session | None
     return None
 
 
+def session_ref_key(session: Session) -> tuple[str, str]:
+    return session.provider, session.id
+
+
+def attached_sessions_for_track(
+    state: State,
+    track_id: str,
+    metadata: dict[tuple[str, str], SessionDisplayMetadata] | None = None,
+) -> list[Session]:
+    metadata = metadata or session_display_metadata_map(state.sessions)
+    sessions = [session for session in state.sessions if session.track_id == track_id]
+    return sorted(sessions, key=lambda item: session_sort_key(item, metadata), reverse=True)
+
+
+def attached_codex_sessions(
+    state: State,
+    track_id: str,
+    metadata: dict[str, CodexSessionMetadata] | None = None,
+) -> list[Session]:
+    sessions = [
+        session
+        for session in state.sessions
+        if session.provider == "codex" and session.track_id == track_id
+    ]
+    display_metadata = session_display_metadata_map(sessions)
+    return sorted(sessions, key=lambda item: session_sort_key(item, display_metadata), reverse=True)
+
+
+def discover_unattached_codex_sessions(state: State) -> list[tuple[str, str | None, str | None, str | None]]:
+    attached_ids = {
+        session.id
+        for session in state.sessions
+        if session.provider == "codex" and session.track_id
+    }
+    metadata_by_id = read_codex_session_index()
+    stored_unattached = {
+        session.id: session
+        for session in state.sessions
+        if session.provider == "codex" and session.track_id is None
+    }
+    for session_id in stored_unattached:
+        if session_id not in metadata_by_id:
+            fallback = read_codex_session_metadata_from_rollout(session_id)
+            if fallback is not None:
+                metadata_by_id[session_id] = fallback
+
+    candidates: dict[str, tuple[str | None, str | None, str | None]] = {}
+    for session_id, session in stored_unattached.items():
+        metadata = metadata_by_id.get(session_id, CodexSessionMetadata(session_id))
+        candidates[session_id] = (session.alias, metadata.name, metadata.updated_at or session.updated_at)
+
+    for session_id, metadata in metadata_by_id.items():
+        if session_id in attached_ids:
+            continue
+        session = stored_unattached.get(session_id)
+        alias = session.alias if session else None
+        updated_at = metadata.updated_at or (session.updated_at if session else None)
+        candidates.setdefault(session_id, (alias, metadata.name, updated_at))
+
+    return sorted(
+        [(session_id, alias, name, updated_at) for session_id, (alias, name, updated_at) in candidates.items()],
+        key=lambda item: item[3] or "",
+        reverse=True,
+    )
+
+
 def select_track_session(
     state: State,
     track_id: str,
@@ -1086,7 +1730,8 @@ def select_track_session(
         for session in state.sessions
         if session.provider == "codex" and session.track_id == track_id
     ]
-    sessions.sort(key=lambda item: session_sort_key(item, metadata), reverse=True)
+    display_metadata = session_display_metadata_map(sessions)
+    sessions.sort(key=lambda item: session_sort_key(item, display_metadata), reverse=True)
     if session_ref is None:
         return sessions[0] if sessions else None
 
@@ -1128,6 +1773,43 @@ def session_counts(state: State) -> dict[str, int]:
             continue
         counts[session.track_id] = counts.get(session.track_id, 0) + 1
     return counts
+
+
+def session_rollups_by_track(
+    sessions: list[Session],
+    status_by_session: dict[tuple[str, str], SessionDisplayStatus],
+) -> dict[str, str]:
+    sessions_by_track: dict[str, list[Session]] = {}
+    for session in sessions:
+        if session.track_id is None:
+            continue
+        sessions_by_track.setdefault(session.track_id, []).append(session)
+    return {
+        track_id: session_rollup(track_sessions, status_by_session)
+        for track_id, track_sessions in sessions_by_track.items()
+    }
+
+
+def session_rollup(
+    sessions: list[Session],
+    status_by_session: dict[tuple[str, str], SessionDisplayStatus],
+) -> str:
+    counts: dict[str, int] = {"running": 0, "waiting": 0, "idle": 0, "unknown": 0}
+    for session in sessions:
+        status = status_by_session.get(session_ref_key(session), SessionDisplayStatus(session.provider, session.id)).state
+        counts[status if status in counts else "unknown"] += 1
+
+    parts: list[str] = []
+    labels = {
+        "running": "run",
+        "waiting": "wait",
+        "idle": "idle",
+        "unknown": "unk",
+    }
+    for state in ("running", "waiting", "idle", "unknown"):
+        if counts[state]:
+            parts.append(f"{labels[state]}:{counts[state]}")
+    return " ".join(parts) if parts else "-"
 
 
 def render_table(headers: list[str], rows: list[list[str]]) -> str:
@@ -1463,6 +2145,68 @@ def current_codex_session_id(worktree_path: Path, current_cwd: Path) -> str | No
     return discover_codex_session_id(worktree_path, current_cwd)
 
 
+def current_track_for_cwd(state: State) -> Track | None:
+    try:
+        context = current_context(Path.cwd())
+    except GitError:
+        return None
+    return match_track_for_context(state, context)
+
+
+def session_display_metadata_map(sessions: list[Session]) -> dict[tuple[str, str], SessionDisplayMetadata]:
+    metadata_by_session: dict[tuple[str, str], SessionDisplayMetadata] = {}
+    codex_sessions = [session for session in sessions if session.provider == "codex"]
+    codex_metadata = codex_session_metadata_map(codex_sessions) if codex_sessions else {}
+
+    for session in sessions:
+        key = session_ref_key(session)
+        if session.provider == "codex":
+            metadata = codex_metadata.get(session.id)
+            metadata_by_session[key] = SessionDisplayMetadata(
+                provider=session.provider,
+                session_id=session.id,
+                name=metadata.name if metadata is not None else None,
+                updated_at=(metadata.updated_at if metadata is not None else None) or session.updated_at,
+            )
+            continue
+        metadata_by_session[key] = SessionDisplayMetadata(
+            provider=session.provider,
+            session_id=session.id,
+            updated_at=session.updated_at,
+        )
+    return metadata_by_session
+
+
+def session_display_status_map(
+    sessions: list[Session],
+    metadata_by_session: dict[tuple[str, str], SessionDisplayMetadata] | None = None,
+) -> dict[tuple[str, str], SessionDisplayStatus]:
+    metadata_by_session = metadata_by_session or session_display_metadata_map(sessions)
+    statuses: dict[tuple[str, str], SessionDisplayStatus] = {}
+    codex_sessions = [session for session in sessions if session.provider == "codex"]
+    codex_status = codex_session_status_map(codex_sessions) if codex_sessions else {}
+
+    for session in sessions:
+        key = session_ref_key(session)
+        if session.provider == "codex" and session.id in codex_status:
+            status = codex_status[session.id]
+            statuses[key] = SessionDisplayStatus(
+                provider=session.provider,
+                session_id=session.id,
+                state=status.state,
+                detail=status.detail,
+                activity_at=status.activity_at or metadata_by_session.get(key, SessionDisplayMetadata(session.provider, session.id)).updated_at or session.updated_at,
+            )
+            continue
+        statuses[key] = SessionDisplayStatus(
+            provider=session.provider,
+            session_id=session.id,
+            state="unknown",
+            activity_at=metadata_by_session.get(key, SessionDisplayMetadata(session.provider, session.id)).updated_at or session.updated_at,
+        )
+    return statuses
+
+
 def codex_session_metadata_map(sessions: list[Session]) -> dict[str, CodexSessionMetadata]:
     session_ids = {session.id for session in sessions if session.provider == "codex"}
     if not session_ids:
@@ -1475,6 +2219,15 @@ def codex_session_metadata_map(sessions: list[Session]) -> dict[str, CodexSessio
         if fallback is not None:
             metadata_by_id[session_id] = fallback
     return {session_id: metadata_by_id[session_id] for session_id in session_ids if session_id in metadata_by_id}
+
+
+def codex_session_status_map(sessions: list[Session]) -> dict[str, CodexSessionStatus]:
+    statuses: dict[str, CodexSessionStatus] = {}
+    for session in sessions:
+        if session.provider != "codex":
+            continue
+        statuses[session.id] = read_codex_session_status_from_rollout(session.id) or CodexSessionStatus(session.id, "unknown")
+    return statuses
 
 
 def read_codex_session_index() -> dict[str, CodexSessionMetadata]:
@@ -1513,6 +2266,19 @@ def read_codex_session_metadata_from_rollout(session_id: str) -> CodexSessionMet
         metadata = read_codex_session_metadata_file(path, session_id)
         if metadata is not None:
             return metadata
+    return None
+
+
+def read_codex_session_status_from_rollout(session_id: str) -> CodexSessionStatus | None:
+    sessions_root = Path.home() / ".codex" / "sessions"
+    if not sessions_root.exists():
+        return None
+
+    candidates = sorted(sessions_root.rglob(f"rollout-*{session_id}.jsonl"), reverse=True)
+    for path in candidates:
+        status = read_codex_session_status_file(path, session_id)
+        if status is not None:
+            return status
     return None
 
 
@@ -1563,12 +2329,145 @@ def read_codex_session_metadata_file(path: Path, expected_session_id: str) -> Co
     return CodexSessionMetadata(session_id=discovered_id, name=name, updated_at=updated_at)
 
 
-def session_activity_at(session: Session, metadata_by_id: dict[str, CodexSessionMetadata]) -> str:
-    return metadata_by_id.get(session.id, CodexSessionMetadata(session.id)).updated_at or session.updated_at
+def read_codex_session_status_file(path: Path, expected_session_id: str) -> CodexSessionStatus | None:
+    discovered_id: str | None = None
+    last_timestamp: str | None = None
+    saw_non_meta = False
+    task_active = False
+    pending_calls: dict[str, str] = {}
+    explicit_wait_call_id: str | None = None
+    last_assistant_question_at: str | None = None
+    last_user_message_at: str | None = None
+    last_completed_at: str | None = None
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                timestamp = optional_text(record.get("timestamp"))
+                if timestamp is not None:
+                    last_timestamp = timestamp
+
+                record_type = record.get("type")
+                payload = record.get("payload")
+                if record_type == "session_meta":
+                    if not isinstance(payload, dict):
+                        continue
+                    session_id = optional_text(payload.get("id"))
+                    if session_id != expected_session_id:
+                        continue
+                    discovered_id = session_id
+                    continue
+
+                if discovered_id is None:
+                    continue
+
+                if record_type == "event_msg":
+                    if not isinstance(payload, dict):
+                        continue
+                    event_type = payload.get("type")
+                    if event_type == "task_started":
+                        task_active = True
+                        pending_calls = {}
+                        explicit_wait_call_id = None
+                        last_assistant_question_at = None
+                        last_user_message_at = None
+                        saw_non_meta = True
+                        continue
+                    if event_type == "task_complete":
+                        task_active = False
+                        pending_calls = {}
+                        explicit_wait_call_id = None
+                        last_completed_at = timestamp or last_completed_at
+                        saw_non_meta = True
+                        continue
+                    if event_type in {"thread_rolled_back", "turn_aborted"}:
+                        task_active = False
+                        pending_calls = {}
+                        explicit_wait_call_id = None
+                        saw_non_meta = True
+                        continue
+                    if event_type == "user_message":
+                        last_user_message_at = timestamp or last_user_message_at
+                        saw_non_meta = True
+                        continue
+                    continue
+
+                if record_type != "response_item" or not isinstance(payload, dict):
+                    continue
+
+                item_type = payload.get("type")
+                if item_type in {"function_call", "custom_tool_call"}:
+                    call_id = optional_text(payload.get("call_id"))
+                    name = optional_text(payload.get("name")) or item_type
+                    if call_id:
+                        pending_calls[call_id] = name
+                        if name == "request_user_input":
+                            explicit_wait_call_id = call_id
+                    saw_non_meta = True
+                    continue
+
+                if item_type in {"function_call_output", "custom_tool_call_output"}:
+                    call_id = optional_text(payload.get("call_id"))
+                    if call_id:
+                        if explicit_wait_call_id == call_id:
+                            explicit_wait_call_id = None
+                        pending_calls.pop(call_id, None)
+                    saw_non_meta = True
+                    continue
+
+                if item_type == "message":
+                    saw_non_meta = True
+                    role = optional_text(payload.get("role"))
+                    if role == "assistant":
+                        message_text = extract_message_text(payload)
+                        if message_text and looks_like_question(message_text):
+                            last_assistant_question_at = timestamp or last_assistant_question_at
+                        else:
+                            last_assistant_question_at = None
+                    elif role == "user":
+                        last_user_message_at = timestamp or last_user_message_at
+
+    except OSError:
+        return None
+
+    if discovered_id is None:
+        return None
+    if explicit_wait_call_id is not None:
+        return CodexSessionStatus(discovered_id, "waiting", "user input requested", last_timestamp)
+    if task_active and last_assistant_question_at is not None and (
+        last_user_message_at is None or last_user_message_at < last_assistant_question_at
+    ):
+        return CodexSessionStatus(discovered_id, "waiting", "assistant asked a question", last_timestamp)
+    if pending_calls:
+        pending_name = next(iter(pending_calls.values()))
+        return CodexSessionStatus(discovered_id, "running", f"tool call in progress: {pending_name}", last_timestamp)
+    if task_active:
+        return CodexSessionStatus(discovered_id, "running", "task in progress", last_timestamp)
+    if saw_non_meta or last_completed_at is not None:
+        return CodexSessionStatus(discovered_id, "idle", "no active task", last_timestamp)
+    return CodexSessionStatus(discovered_id, "unknown", None, last_timestamp)
 
 
-def session_sort_key(session: Session, metadata_by_id: dict[str, CodexSessionMetadata]) -> str:
-    return session_activity_at(session, metadata_by_id)
+def session_activity_at(
+    session: Session,
+    metadata_by_session: dict[tuple[str, str], SessionDisplayMetadata],
+) -> str:
+    return metadata_by_session.get(session_ref_key(session), SessionDisplayMetadata(session.provider, session.id)).updated_at or session.updated_at
+
+
+def session_sort_key(
+    session: Session,
+    metadata_by_session: dict[tuple[str, str], SessionDisplayMetadata],
+) -> str:
+    return session_activity_at(session, metadata_by_session)
 
 
 def discover_codex_session_id(worktree_path: Path, current_cwd: Path) -> str | None:
@@ -1682,6 +2581,27 @@ def optional_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def extract_message_text(payload: dict[str, object]) -> str:
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        text = optional_text(item.get("text"))
+        if text:
+            parts.append(text)
+    return " ".join(parts).strip()
+
+
+def looks_like_question(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return stripped.endswith("?")
 
 
 def path_from_payload(value: object) -> Path | None:
